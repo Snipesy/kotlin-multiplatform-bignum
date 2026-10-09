@@ -1,20 +1,21 @@
 pluginManagement {
-  repositories {
-    google()
-    mavenCentral()
-    gradlePluginPortal()
-  }
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
 }
 
 dependencyResolutionManagement {
-  repositories {
-    google()
-    mavenCentral()
-  }
+    repositories {
+        google()
+        mavenCentral()
+    }
 }
 
 rootProject.name = "kotlin-bignum"
 
-include(":bignum")
+includeBuild("build-logic")
 
+include(":bignum")
 include(":bignum-serialization-kotlinx")
