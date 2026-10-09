@@ -605,8 +605,16 @@ class BigInteger internal constructor(wordArray: WordArray, requestedSign: Sign)
     return arithmetic.bitLength(magnitude)
   }
 
+  /** Digit count of [magnitude], computed on first use; -1 until then. */
+  private var decimalDigitsCache: Long = -1L
+
   override fun numberOfDecimalDigits(): Long {
-    return arithmetic.numberOfDecimalDigits(magnitude)
+    var digits = decimalDigitsCache
+    if (digits < 0L) {
+      digits = arithmetic.numberOfDecimalDigits(magnitude)
+      decimalDigitsCache = digits
+    }
+    return digits
   }
 
   override infix fun shl(places: Int): BigInteger {

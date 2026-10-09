@@ -69,7 +69,23 @@ private constructor(
   NarrowingOperations<BigDecimal>,
   Comparable<Any> {
 
+  /**
+   * Number of decimal digits in [significand]. Counting digits costs a division for large values,
+   * and most intermediate results of a calculation are never asked for it, so it is computed on
+   * first use rather than in the constructor. Scaled decimals set it eagerly because their
+   * [decimalMode] is derived from it.
+   */
+  private var precisionCache: Long = -1L
+
   val precision: Long
+    get() {
+      var cached = precisionCache
+      if (cached < 0L) {
+        cached = significand.numberOfDecimalDigits()
+        precisionCache = cached
+      }
+      return cached
+    }
 
   val significand: BigInteger
   val exponent: Long
@@ -82,17 +98,16 @@ private constructor(
         significand = wrk.significand
         exponent = wrk.exponent
         val newPrecision = significand.numberOfDecimalDigits()
-        precision = newPrecision
+        precisionCache = newPrecision
         decimalMode = _decimalMode.copy(decimalPrecision = newPrecision)
       } else {
         significand = wrk.significand
         exponent = wrk.exponent.times(_decimalMode.decimalPrecision + _decimalMode.scale)
-        precision = _decimalMode.decimalPrecision + _decimalMode.scale
-        decimalMode = _decimalMode.copy(decimalPrecision = precision)
+        precisionCache = _decimalMode.decimalPrecision + _decimalMode.scale
+        decimalMode = _decimalMode.copy(decimalPrecision = precisionCache)
       }
     } else {
       significand = _significand
-      precision = _significand.numberOfDecimalDigits()
       exponent = _exponent
       decimalMode = _decimalMode
     }

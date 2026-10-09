@@ -419,7 +419,7 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
     }
     // The quotient has at most a few digits, so this division is cheap even though the
     // divisor is as long as the operand.
-    var tmp = operand / pow(TEN, lowerBound)
+    var tmp = operand / powerOfTen(lowerBound)
     var counter = 0L
     while (compare(tmp, ZERO) != 0) {
       tmp /= TEN
@@ -1087,6 +1087,30 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
     )
   }
 
+  /**
+   * Powers of ten above the eagerly built [powersOf10] table, filled on demand up to
+   * [POWER_OF_TEN_CACHE_LIMIT]. Decimal alignment and digit counting ask for the same powers over
+   * and over; a value computed twice under contention is identical, so no locking is needed.
+   */
+  private const val POWER_OF_TEN_CACHE_LIMIT = 1024
+  private val powerOfTenCache = arrayOfNulls<ULongArray>(POWER_OF_TEN_CACHE_LIMIT + 1)
+
+  fun powerOfTen(exponent: Long): ULongArray {
+    if (exponent < powersOf10.size) {
+      return powersOf10[exponent.toInt()]
+    }
+    if (exponent > POWER_OF_TEN_CACHE_LIMIT) {
+      return powBySquaring(TEN, exponent)
+    }
+    val index = exponent.toInt()
+    powerOfTenCache[index]?.let {
+      return it
+    }
+    val computed = powBySquaring(TEN, exponent)
+    powerOfTenCache[index] = computed
+    return computed
+  }
+
   override fun pow(base: ULongArray, exponent: Long): ULongArray {
     if (exponent == 0L) {
       return ONE
@@ -1094,10 +1118,13 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
     if (exponent == 1L) {
       return base
     }
-    if (base.size == 1 && base[0] == 10UL && exponent < powersOf10.size) {
-      return powersOf10[exponent.toInt()]
+    if (base.size == 1 && base[0] == 10UL) {
+      return powerOfTen(exponent)
     }
+    return powBySquaring(base, exponent)
+  }
 
+  private fun powBySquaring(base: ULongArray, exponent: Long): ULongArray {
     val firstCorrectedSize = base.size - countLeadingZeroWords(base)
     var helperVar = ONE
     var exponentVar = exponent
