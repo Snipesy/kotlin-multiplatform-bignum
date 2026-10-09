@@ -62,7 +62,8 @@ class BigInteger63JavaMultiplyTest {
     }
 
     assertTrue {
-      val a = ulongArrayOf((0UL - 1UL), 10U)
+      // Words are 63 bits wide, so the largest valid word has the top bit clear.
+      val a = ulongArrayOf(ULong.MAX_VALUE shr 1, 10U)
       val b = ulongArrayOf(20U)
       val c = BigInteger63Arithmetic.multiply(a, b)
 

@@ -724,31 +724,41 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
     )
   }
 
+  /**
+   * Schoolbook multiplication accumulated in place: one 128-bit limb product per (i, j) pair and no
+   * intermediate arrays. Carries never exceed a limb because at every position the accumulated
+   * value is at most (B - 1) + (B - 1)^2 + (B - 1) = B^2 - 1 for B = 2^63.
+   */
   private fun basecaseMultiplyWithCorrectedSize(
     first: ULongArray,
     second: ULongArray,
     firstCorrectedSizeStart: Int,
     secondCorrectedSizeStart: Int,
   ): ULongArray {
-
-    var resultArray = ZERO
-    second.forEachIndexed { index: Int, element: ULong ->
-      if (index > secondCorrectedSizeStart) {
-        resultArray
-      } else {
-        resultArray =
-          resultArray +
-            (baseMultiply(
-              first,
-              element,
-            ) shl (index * basePowerOfTwo))
+    val result = ULongArray(firstCorrectedSizeStart + secondCorrectedSizeStart)
+    for (j in 0 until secondCorrectedSizeStart) {
+      val multiplier = second[j]
+      if (multiplier == 0UL) {
+        continue
       }
+      var carry = 0UL
+      for (i in 0 until firstCorrectedSizeStart) {
+        val multiplicand = first[i]
+        val low = multiplicand * multiplier
+        val high = multiplyHigh(multiplicand, multiplier)
+        val lowLimb = low and baseMask
+        val highLimb = (high shl 1) or (low shr 63)
+        // Add in two steps so that no 64-bit intermediate can overflow.
+        var sum = result[i + j] + lowLimb
+        var carryOut = sum shr 63
+        sum = (sum and baseMask) + carry
+        carryOut += sum shr 63
+        result[i + j] = sum and baseMask
+        carry = highLimb + carryOut
+      }
+      result[firstCorrectedSizeStart + j] = carry
     }
-    return resultArray
-  }
-
-  fun combaMultiply(first: ULongArray, second: ULongArray) {
-    // TODO
+    return removeLeadingZeros(result)
   }
 
   fun karatsubaMultiply(firstUnsigned: ULongArray, secondUnsigned: ULongArray): ULongArray {
@@ -988,103 +998,36 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
     )
   }
 
-  fun baseMultiplyIntoArray(
-    result: ULongArray,
-    resultStart: Int,
-    resultEnd: Int,
-    first: ULongArray,
-    second: ULong,
-  ): ULongArray {
-    TODO()
-  }
-
   fun baseMultiplyWithCorrectedSize(
     first: ULongArray,
     second: ULong,
     firstCorrectedSize: Int,
   ): ULongArray {
-    val secondLow = second and lowMask
-    val secondHigh = second shr 32
-
-    val requiredBits = bitLength(first) + bitLength(second)
-    val requiredWords =
-      if (requiredBits % 63 != 0) {
-        (requiredBits / 63) + 1
-      } else {
-        requiredBits / 63
-      }
-    val result = ULongArray(requiredWords)
-
-    var carryIntoNextRound = 0UL
-    var i = 0
-    var j = 0
-    while (i < firstCorrectedSize) {
-      val firstLow = first[i] and lowMask
-      val firstHigh = first[i] shr 32
-      i++
-
-      // Calculate low part product
-      val lowerProduct = (firstLow * secondLow)
-      var lowerCarry = lowerProduct shr 63
-      var lowResult = carryIntoNextRound + (lowerProduct and baseMask)
-      lowerCarry += lowResult shr 63
-      lowResult = lowResult and baseMask
-
-      val middleProduct = firstLow * secondHigh + secondLow * firstHigh
-      var middleCarry = lowerCarry
-      middleCarry += (middleProduct shr 31)
-      lowResult += (middleProduct shl 32) and baseMask
-      middleCarry += (lowResult shr 63)
-
-      result[j] = lowResult and baseMask
-
-      var highResult = middleCarry
-      val higherProduct = (firstHigh * secondHigh) shl 1
-      highResult = highResult + higherProduct
-
-      carryIntoNextRound = highResult
-      j++
+    if (second == 0UL || firstCorrectedSize == 0) {
+      return ZERO
     }
-    if (carryIntoNextRound != 0UL) {
-      result[j] = carryIntoNextRound
+    val result = ULongArray(firstCorrectedSize + 1)
+    var carry = 0UL
+    for (i in 0 until firstCorrectedSize) {
+      val multiplicand = first[i]
+      val low = multiplicand * second
+      val high = multiplyHigh(multiplicand, second)
+      val sum = (low and baseMask) + carry
+      result[i] = sum and baseMask
+      carry = ((high shl 1) or (low shr 63)) + (sum shr 63)
     }
-    return result
+    result[firstCorrectedSize] = carry
+    return removeLeadingZeros(result)
   }
 
-  /*
-  Useful when we want to do a ULong * ULong -> ULongArray
-   */
+  /** The product of two words as a (one- or two-limb) array. */
   fun multiply(first: ULong, second: ULong): ULongArray {
     if (first == 0UL || second == 0UL) {
       return ulongArrayOf(0UL)
     }
-    // Split the operands
-    val firstLow = first and lowMask
-    val firstHigh = first shr 32
-    val secondLow = second and lowMask
-    val secondHigh = second shr 32
-
-    // Calculate low part product
-    val lowerProduct = firstLow * secondLow
-    val lowCarry = lowerProduct shr 63
-    var lowResult = lowerProduct and baseMask
-
-    val middleProduct = firstLow * secondHigh + secondLow * firstHigh
-    var middleCarry = lowCarry
-    middleCarry += (middleProduct shr 31)
-    lowResult += (middleProduct shl 32) and baseMask
-    middleCarry += (lowResult shr 63)
-
-    var highResult = middleCarry
-    val higherProduct = (firstHigh * secondHigh) shl 1
-    highResult = highResult + higherProduct
-
-    return removeLeadingZeros(
-      ulongArrayOf(
-        lowResult and baseMask,
-        highResult,
-      )
-    )
+    val low = first * second
+    val high = multiplyHigh(first, second)
+    return removeLeadingZeros(ulongArrayOf(low and baseMask, (high shl 1) or (low shr 63)))
   }
 
   /**
