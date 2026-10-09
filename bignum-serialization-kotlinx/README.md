@@ -1,26 +1,13 @@
 # Support for kotlinx-serialization
 
-Supports BigInteger and BigDecimal serialization using KotlinX Serialization library. 
+> **Status: prototype.** Part of an unofficial, unpublished prototype fork; see the root README.
 
-Note that because KotlinX Serialization doesn't support linux arm targets as well as MinGW x86, serialization support library doesn't either.
-Additionally, because of a bug when building serialization support library only JS IR variant is provided.
+Supports BigInteger and BigDecimal serialization using KotlinX Serialization library.
 
 ## Integration
 
-#### Gradle
 ```kotlin
-implementation("com.ionspin.kotlin:bignum-serialization-kotlinx:0.3.2")
-```
-
-#### Snapshot builds
-```kotlin
-repositories {
-    maven {
-        url = uri("https://oss.sonatype.org/content/repositories/snapshots")
-    }
-}
-implementation("com.ionspin.kotlin:bignum:0.3.3-SNAPSHOT")
-
+implementation("dev.ohs.bignum:bignum-serialization-kotlinx:0.4.0")
 ```
 
 ## Quick setup and sample
@@ -61,7 +48,7 @@ as they don't need to convert to string and back, which are in general slow oper
 
         @Serializable
         data class BigIntegerArraySerializtionTestData(@Contextual val a : BigInteger, @Contextual val b : BigInteger)
-        
+
         val a = BigInteger.parseString("-1000000000000000000000000000002000000000000000000000000000003")
         val b = BigInteger.parseString("1000000000000000000000000000002000000000000000000000000000003")
         val testObject = BigIntegerHumanReadableSerializtionTestData(a, b)
@@ -87,7 +74,7 @@ as they don't need to convert to string and back, which are in general slow oper
         }
         val serialized = json.encodeToString(testObject)
         println(serialized)
-        
+
         result: {"a":"-1000000000000000000000000000002000000000000000000000000000003","b":"1000000000000000000000000000002000000000000000000000000000003"}
 ```
 
@@ -102,7 +89,7 @@ as they don't need to convert to string and back, which are in general slow oper
 
         val a = BigDecimal.parseString("1.000000000020000000000300000000004")
         val b = BigDecimal.parseString("-1.000000000020000000000300000000004")
-        
+
         val testObject = BigDecimalHumanReadableTestData(a, b)
         val json = Json {
             serializersModule = bigDecimalHumanReadableSerializerModule
@@ -113,7 +100,7 @@ as they don't need to convert to string and back, which are in general slow oper
         result: {"a":"1.000000000020000000000300000000004","b":"-1.000000000020000000000300000000004"}
 ```
 
-#### Array based: 
+#### Array based:
 ```kotlin
         val a = BigDecimal.parseString("1.000000000020000000000300000000004")
         val b = BigDecimal.parseString("-1.000000000020000000000300000000004")
@@ -126,5 +113,3 @@ as they don't need to convert to string and back, which are in general slow oper
 
         result: {"a":{"significand":{"magnitude":[7819074433982969860,108420217250718],"sign":"POSITIVE"},"exponent":0},"b":{"significand":{"magnitude":[7819074433982969860,108420217250718],"sign":"NEGATIVE"},"exponent":0}}
 ```
-
-

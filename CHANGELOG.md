@@ -2,7 +2,14 @@
 (All dates are DD.MM.YYYY)
 
 
-##### 0.3.11-SNAPSHOT - current 
+##### 0.4.0 - unreleased prototype fork
+- Forked from ionspin/kotlin-multiplatform-bignum; package renamed to `dev.ohs.bignum` and
+  artifacts published under `dev.ohs.bignum`.
+- Build on JDK 25 with Gradle 9.5.1 and Kotlin 2.3.20; Gradle version catalog, Spotless (ktfmt
+  Google style) and the vanniktech Maven publish plugin replace buildSrc, Dokka and the shell
+  publishing scripts.
+- Faster parsing, printing and digit counting, and BigDecimal comparison that no longer
+  materialises powers of ten: 10,000-digit toString 3,976 ms -> 7 ms on the JVM.
 
 ##### 0.3.10 - 15.7.2024
 - Fix for #280, return byte array containing zero instead of empty array when big integer is zero.
@@ -27,10 +34,10 @@
 - Bump to Kotlin 1.8.10
 - Fix for #253, empty string is not a valid floating point number any more and parsing it throws ArithmeticException
 - Fix for #245, division test failures run in coroutines were ignored.
-- 
+-
 ##### 0.3.7 - 6.8.2022
 - Bump to Kotlin 1.7.10
-- Fix for #239, toPlainString which was supposed to return same result as JVM was truncating zeroes when scale was used. 
+- Fix for #239, toPlainString which was supposed to return same result as JVM was truncating zeroes when scale was used.
 - Fix for #238, wrong exponent in resolved decimal precision was used in divideAndRemainder
 - Fix for #237, when precision and exponent are same invalid value was returned
 - Fix for #231, exception incorrectly thrown when using scale (the library was only checking for unlimited precision instead of that and presence of scale)
@@ -47,8 +54,8 @@
 - Fix for invalid decimal precision when dividend has exponent -1 (#195)
 - **API CHANGE** Narrowing function (longValue, intValue, doubleValue...) are now defaulting to `exactRequired` which means they
 will throw ArithmeticException if the conversion cannot be done without loss.
-- Use temporary javascript comparison workaround to handle precision loss. 
-  
+- Use temporary javascript comparison workaround to handle precision loss.
+
 
 ##### 0.3.3 - 9.11.2021
 - Add support for apple silicon (#188 #194)
@@ -104,14 +111,14 @@ https://status.maven.org/incidents/z70skgbq8vgc
 - Bump to Kotlin 1.4.20
 - Fix for invalid exponent rounding and string representation (#139)
 - Returned mingwx86 target (#137)
-- Fixed #134 
+- Fixed #134
 - Fixed #130 Conversion to double off by power of 10
 - Fixed #132 BigDecimal narrow functions toFloat() and toDouble, with exactRequired = false sometimes wrongly fail
 - Fixed floatValue and doubleValue narrowing functions (pull request #135)
-- Fixed invalid string parsing of big decimals 
+- Fixed invalid string parsing of big decimals
 
 ##### 0.2.2 - 10.10.2020 - Rework infinite precision division
-- Issue #127 - invalid division when using unlimited precision wasn't completely handled 
+- Issue #127 - invalid division when using unlimited precision wasn't completely handled
 in the previous release. With this release that division case was completely reworked and additional tests were added.
 
 ##### 0.2.1 - 8.10.2020 - Fix infinite precision division, kotlin version bump
@@ -139,12 +146,12 @@ in the previous release. With this release that division case was completely rew
     - Replaced with a consistent to and from byte/ubyte array conversions
         - `fromUByteArray` always expects a big-endian ordered array of unsigned bytes
         - `fromByteArray` always expects a big-endian ordered array of bytes
-        - `toUByteArray` produces unsigned byte array in big-endian order 
+        - `toUByteArray` produces unsigned byte array in big-endian order
         - `toByteArray` produces signed byte array in big-endian order
     - There are two helper methods that convert  to and from a two's complement ByteArray, this form conforms to Java BigIntegers toByteArray
         - `fromTwosComplementByteArray` expects a two's complement ByteArray with at least one sign bit
         - `toTwosComplementByteArray`produces a two's complement ByteArray with at least one sign bit
-- Added `secureOverwrite` to BigNumber interface, with role of overwriting backing structures with zeroes. It's meant to 
+- Added `secureOverwrite` to BigNumber interface, with role of overwriting backing structures with zeroes. It's meant to
 be used by libraries that require such a functionlity (i.e. crypto). The function also breaks immutability contract
 of BigNumber implementations, and further operations with that instances have undefined results.
 
@@ -152,7 +159,7 @@ of BigNumber implementations, and further operations with that instances have un
 - Version bump to kotlin 1.3.61
 - Gradlew wrapper bump to 6.0.1
 - Added Linux Arm 64, and Linux Arm 32 HFP build targets
-- Fixed smaller issues 
+- Fixed smaller issues
 
 
 ##### 0.1.4 - 10.12.2019 - BigDecimal improvements, MINGW64 and MINGW86 targets added
@@ -162,8 +169,8 @@ of BigNumber implementations, and further operations with that instances have un
 - Use Long instead of BigInteger for BigDecimal exponent.
 - Adding MingwX64 and MingwX86 targets.
 
-##### 0.1.3 - 19.11.2019 - Kotlin and Gradle version bump 
-- Kotlin version bump to 1.3.60 - especially important as there was a comparison performance improvement for inline classes 
+##### 0.1.3 - 19.11.2019 - Kotlin and Gradle version bump
+- Kotlin version bump to 1.3.60 - especially important as there was a comparison performance improvement for inline classes
 which are heavily used by bignum library (ULong/UInt).
 - Actually bumped gradle to 5.6.1, it was mistakenly left at 5.1.1 in library versions 0.1.1 and 0.1.2
 - Cleaned up dependancies, coroutines are currently used only in test modules so they are moved there.
@@ -191,7 +198,7 @@ metadata resolution available only on Gradle >= 5.3
 ##### 0.1.0 - 31.7.2019 ByteArray support and other improvements
 - Added toByteArray and fromByteArray.
 - Added toFloat and toDouble to BigInteger and ModularBigInteger classes.
-- Added BigInteger creation from Float and Double by using `tryFromFloat` and `tryFromDouble`, with optional exact 
+- Added BigInteger creation from Float and Double by using `tryFromFloat` and `tryFromDouble`, with optional exact
 parameter to preserve precision.
 - Added BigInteger comparison with Float and Double.
 - Added BigDecimal configuration option to switch to expanded representation instead of scientific when calling `toString()`.
@@ -203,16 +210,16 @@ parameter to preserve precision.
 - Extracted interfaces that model big numbers better (BigNumber<BigType> interface and accompanying interfaces)
 - Implemented integer reciprocal based on newton iteration (Based on paper by Yiping Cheng, Ze Lie : Refinement of a newton reciprocal algorithm for arbitrary precision numbers)
 - Implemented division by reciprocal multiplication. Not used by division at the moment as it is unoptimized and slower than basecase division in early benchmarks.
-- Fixed a bug in Int32 shift right when shift amount was an exact multiple of word size 
+- Fixed a bug in Int32 shift right when shift amount was an exact multiple of word size
 - Added constructor overloads
 - Added value methods (intValue, longValue...)
 - Renamed invPrecise() bigInteger method to not()
 - Renamed numberOfDigits() to numberOfDecimalDigits()
-- Introduced BigNumber and BitwiseOperations interfaces 
-- Added iOS ARM 32bit support 
+- Introduced BigNumber and BitwiseOperations interfaces
+- Added iOS ARM 32bit support
 
 
-##### 0.0.8 - 02.04.2019 - Minor update 
+##### 0.0.8 - 02.04.2019 - Minor update
 - Released ios (for X64 and arm) and macos X64 artifacts
 - No functional changes
 
@@ -222,10 +229,9 @@ parameter to preserve precision.
 - Fixed a couple of parsing issues
 - Added this changelog
 
-##### 0.0.6 - 30.3.2019 - Adding floating point support/BigDecimal  
+##### 0.0.6 - 30.3.2019 - Adding floating point support/BigDecimal
 - Added BigDecimal
 - Fixed several BigInteger bugs
 
-#### 0.0.5 - 20.3.2019 - Initial release/BigInteger 
+#### 0.0.5 - 20.3.2019 - Initial release/BigInteger
 - Added Big integer support
-

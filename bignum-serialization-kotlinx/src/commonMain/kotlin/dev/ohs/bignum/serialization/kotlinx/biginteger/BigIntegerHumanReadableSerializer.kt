@@ -1,6 +1,23 @@
-package com.ionspin.kotlin.bignum.serialization.kotlinx.biginteger
+/*
+ * Copyright 2019 Ugljesa Jovanovic
+ * Modifications Copyright 2026 Open Health Stack Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
-import com.ionspin.kotlin.bignum.integer.BigInteger
+package dev.ohs.bignum.serialization.kotlinx.biginteger
+
+import dev.ohs.bignum.integer.BigInteger
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.PrimitiveKind
 import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
@@ -10,27 +27,24 @@ import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.modules.SerializersModule
 
 /**
- * Created by Ugljesa Jovanovic
- * ugljesa.jovanovic@ionspin.com
- * on 04-Jul-2021
+ * Created by Ugljesa Jovanovic ugljesa.jovanovic@ionspin.com on 04-Jul-2021
  *
  * Serializes big integer into base 10 human readable format.
  */
 object BigIntegerHumanReadableSerializer : KSerializer<BigInteger> {
 
-    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("BigInteger", PrimitiveKind.STRING)
+  override val descriptor: SerialDescriptor =
+    PrimitiveSerialDescriptor("BigInteger", PrimitiveKind.STRING)
 
+  override fun serialize(encoder: Encoder, value: BigInteger) {
+    encoder.encodeString(value.toString(10))
+  }
 
-    override fun serialize(encoder: Encoder, value: BigInteger) {
-        encoder.encodeString(value.toString(10))
-    }
-
-    override fun deserialize(decoder: Decoder): BigInteger {
-        return BigInteger.parseString(decoder.decodeString(), 10)
-    }
-
+  override fun deserialize(decoder: Decoder): BigInteger {
+    return BigInteger.parseString(decoder.decodeString(), 10)
+  }
 }
 
 val bigIntegerhumanReadableSerializerModule = SerializersModule {
-    contextual(BigInteger::class, BigIntegerHumanReadableSerializer)
+  contextual(BigInteger::class, BigIntegerHumanReadableSerializer)
 }

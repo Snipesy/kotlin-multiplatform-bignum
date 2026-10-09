@@ -1,25 +1,41 @@
-package com.ionspin.kotlin.bignum.integer
+/*
+ * Copyright 2019 Ugljesa Jovanovic
+ * Modifications Copyright 2026 Open Health Stack Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package dev.ohs.bignum.integer
 
 import kotlin.test.Test
 import kotlin.test.assertFalse
 
-/**
- * Procrastinating
- */
+/** Procrastinating */
 class MajorSystemErrorTest {
-    private fun youThink(block: () -> Boolean) = assertFalse(block = block)
+  private fun youThink(block: () -> Boolean) = assertFalse(block = block)
 
-    private infix fun BigInteger.makes(second: BigInteger): Boolean = this == second
-    private infix fun BigInteger.plus(second: BigInteger): BigInteger = this.plus(second)
+  private infix fun BigInteger.makes(second: BigInteger): Boolean = this == second
 
-    private val ONE = BigInteger.ONE
-    private val SEVENSEVENSEVEN = 777.toBigInteger()
-    private val TWO = BigInteger.TWO
+  private infix fun BigInteger.plus(second: BigInteger): BigInteger = this.plus(second)
 
-    @Test
-    fun canISeeAMajorSystemErrorInYou() {
-            youThink {
-                ONE plus SEVENSEVENSEVEN makes TWO
-            }
-        }
+  private val ONE = BigInteger.ONE
+  private val SEVENSEVENSEVEN = 777.toBigInteger()
+  private val TWO = BigInteger.TWO
+
+  @Test
+  fun canISeeAMajorSystemErrorInYou() {
+    youThink {
+      ONE plus SEVENSEVENSEVEN makes TWO
+    }
+  }
 }

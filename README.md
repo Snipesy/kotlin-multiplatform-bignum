@@ -1,62 +1,91 @@
-[![pipeline status](https://gitlab.com/ionspin-github-ci/kotlin-multiplatform-bignum-ci/badges/main/pipeline.svg)](https://gitlab.com/ionspin-github-ci/kotlin-multiplatform-bignum-ci/-/commits/main)
-[![Maven Central](https://img.shields.io/maven-central/v/com.ionspin.kotlin/bignum.svg)](https://repo1.maven.org/maven2/com/ionspin/kotlin/bignum/)
-# Kotlin MP BigNum library 
+# Kotlin BigNum
 
-Kotlin Multiplatform BigNum library is a pure kotlin implementation of arbitrary precision
-arithmetic operations. It follows the same approach as Kotlin does on JVM to keep the interface
-familiar.
+**Original project:** [ionspin/kotlin-multiplatform-bignum](https://github.com/ionspin/kotlin-multiplatform-bignum),
+created and maintained by **Ugljesa Jovanovic** ([@ionspin](https://github.com/ionspin)).
+All of the arithmetic in this repository is his work; this fork only changes packaging and
+build tooling and adds a handful of performance changes.
 
-## Notes & Roadmap
+[![License](https://img.shields.io/badge/License-Apache_2.0-lightgrey.svg)](https://opensource.org/licenses/Apache-2.0)
 
-This is an implementation of pure kotlin arbitrary integer and floating-point arithmetic support.
+> **Status: prototype.** This repository is an experiment in what an Open Health Stack
+> Foundation fork of Kotlin Multiplatform BigNum could look like. It is not an official OHS
+> Foundation project, it is not published to Maven Central, and the `dev.ohs.bignum`
+> coordinates and package below are placeholders. Use the upstream
+> [ionspin/kotlin-multiplatform-bignum](https://github.com/ionspin/kotlin-multiplatform-bignum)
+> for anything real.
 
-**The APIs might change until v1.0**
+Kotlin BigNum is a pure Kotlin implementation of arbitrary-precision integer and decimal
+arithmetic on [Kotlin Multiplatform](https://kotlinlang.org/docs/multiplatform.html). It follows
+the shape of the JVM `BigInteger` and `BigDecimal` APIs so the interface stays familiar.
 
-Version 0.3.0 brings API changes to BigDecimal API see changelog for full list.
+It is a prototype fork of
+[Kotlin Multiplatform BigNum](https://github.com/ionspin/kotlin-multiplatform-bignum) by
+Ugljesa Jovanovic, exploring the library that backs the `decimal` type in
+[Kotlin FHIR](https://github.com/ohs-foundation/kotlin-fhir) and
+[Kotlin FHIRPath](https://github.com/ohs-foundation/kotlin-fhirpath).
 
-Also, there is a plan to implement platform native versions.
+## Key features
 
-Testing to verify that the library works properly is mostly done against Java BigInteger and BigDecimal implementations.
+* Arbitrary-precision `BigInteger` and `BigDecimal` with no platform dependencies
+* Parsing, printing and comparison that stay fast for very long or very large values
+* Rounding modes and precision control through `DecimalMode`
+* Modular integer arithmetic
+* Optional [`kotlinx.serialization`](https://github.com/Kotlin/kotlinx.serialization) serializers
+* Multiplatform support across Mobile (Android, iOS), Server & Desktop (JVM, macOS, Linux,
+  Windows), and Web (JavaScript, WebAssembly)
 
-## Should I use this in production?
+## Supported platforms
 
-The library is still under development, but at the moment it is feature complete, further improvements will be optimizations
-and bug-fixing. 
+The library supports the following
+[target platforms](https://kotlinlang.org/docs/multiplatform-dsl-reference.html#targets):
 
-### WASM
+| Target platform                    | Gradle target | Artifact suffix |
+|:-----------------------------------|:--------------|:----------------|
+| Kotlin/JVM (also used on Android)  | `jvm`         | `-jvm`          |
+| Kotlin/Wasm (JS)                   | `wasmJs`      | `-wasm-js`      |
+| Kotlin/Wasm (WASI)                 | `wasmWasi`    | `-wasm-wasi`    |
+| Kotlin/JS                          | `js`          | `-js`           |
 
-WASM platform is experimental, use with caution, tests for wasm are not run on Windows and Mac at the moment. Note that currently wasm returns a value after converting to IEEE-754 number, unlike
-other platforms (JVM, JS, Native), so if you use:
-```kotlin
-val a = BigDecimal.fromFloat(0.000000000000123f)
-```
-expect `a` to be `1.2299999885799495E-13`.
+The library also supports the following
+[Kotlin/Native targets](https://kotlinlang.org/docs/native-target-support.html):
+
+| Target platform        | Gradle target                                                                  |
+|:-----------------------|:-------------------------------------------------------------------------------|
+| macOS                  | `macosArm64`, `macosX64`                                                       |
+| iOS                    | `iosArm64`, `iosSimulatorArm64`, `iosX64`                                      |
+| tvOS                   | `tvosArm64`, `tvosSimulatorArm64`, `tvosX64`                                   |
+| watchOS                | `watchosArm32`, `watchosArm64`, `watchosDeviceArm64`, `watchosSimulatorArm64`, `watchosX64` |
+| Linux                  | `linuxX64`, `linuxArm64`                                                       |
+| Windows                | `mingwX64`                                                                     |
+| Android Native         | `androidNativeArm32`, `androidNativeArm64`, `androidNativeX64`, `androidNativeX86` |
 
 ## Integration
 
-#### Gradle
+Nothing is published yet; the coordinates below show the intended shape once a release exists.
+
 ```kotlin
-implementation("com.ionspin.kotlin:bignum:0.3.10")
+implementation("dev.ohs.bignum:bignum:0.4.0")
 ```
 
-#### Snapshot builds
-```kotlin
-repositories {
-    maven {
-        url = uri("https://oss.sonatype.org/content/repositories/snapshots")
-    }
-}
-implementation("com.ionspin.kotlin:bignum:0.3.11-SNAPSHOT")
+For `kotlinx.serialization` support add the serializers module as well, see
+[bignum-serialization-kotlinx](bignum-serialization-kotlinx/README.md):
 
+```kotlin
+implementation("dev.ohs.bignum:bignum-serialization-kotlinx:0.4.0")
 ```
 
-## Serialization
+## Notes
 
-Serializers for KotlinX Serializtion library are provided, see more here [kotlinx serialization support](bignum-serialization-kotlinx/README.md)
+WebAssembly targets return a value after converting to an IEEE-754 number, unlike the JVM, JS and
+Native targets, so if you use:
 
-Note that because kotlinx doesn't support linux ARM targets as well as MinGW x86, serialization support library doesn't either.
-Additionally, because of a bug when building serialization support library only JS IR variant is provided.
+```kotlin
+val a = BigDecimal.fromFloat(0.000000000000123f)
+```
 
+expect `a` to be `1.2299999885799495E-13`.
+
+Testing is done against the JVM `BigInteger` and `BigDecimal` implementations.
 
 ## Usage
 
@@ -156,7 +185,7 @@ val quotientAndRemainder = dividend divrem divisor
 
 println("Quotient: ${quotientAndRemainder.quotient} \nRemainder: ${quotientAndRemainder.remainder}")
 ----- Output -----
-Quotient: 1 
+Quotient: 1
 Remainder: 2147483647
 ```
 
@@ -217,13 +246,13 @@ Or result: ffffffffffff0000000000
 
 #### Binary Not
 
-Unlike Java BigInteger which does two's complement inversion, this method does bitwise inversion, 
+Unlike Java BigInteger which does two's complement inversion, this method does bitwise inversion,
 
 i.e.:
 
     If the number was "1100" binary, not() returns "0011" => "11" => 4 in base 10
     In the same case Java BigInteger would return "1011" => -13 two's complement base 10
-    
+
 ```kotlin
 val operand = BigInteger.parseString("11110000", 2)
 val result = operand.not()
@@ -237,7 +266,7 @@ Inv result: 1111
 A `modInverse` function that is equivalent to java BigInteger `modInverse` is available. Note that this method will
 produce a **BigInteger** not a **ModularBigInteger**
 
-Big integers can be converted to modularIntegers with same modulo, and then `inverse()` method is available. This method 
+Big integers can be converted to modularIntegers with same modulo, and then `inverse()` method is available. This method
 **will** return ModularBigInteger
 
 ```kotlin
@@ -259,7 +288,7 @@ More inforamtion about the ModularBigIntegers can be found in the third section
 #### Parsing
 To create a BigDecimal you can parse a string in _expanded_ or scientific notation
 
-**Scientific** 
+**Scientific**
 
 ```kotlin
 val bigDecimal = BigDecimal.parseString("1.23E-6)")
@@ -285,9 +314,9 @@ val bigDecimal = BigDecimal.fromLong(7111)
 println("BigDecimal: $bigDecimal")
 ----- Output -----
 BigDecimal: 7.111E+3
-``` 
+```
 
-Or you can specify an exponent. when you do specify an exponent, input value (long, int, short, byte) is considered to 
+Or you can specify an exponent. when you do specify an exponent, input value (long, int, short, byte) is considered to
 be in **scientific notation**.
 ```kotlin
 val bigDecimal = BigDecimal.fromLongWithExponent(1, -5L)
@@ -310,15 +339,15 @@ val bigDecimal = "12345678.123".toBigInteger
 Or for `Double` of `Float`
 
 ```kotlin
-val bigDecimalFromFloat = 123.456f.toBigDecimal() 
+val bigDecimalFromFloat = 123.456f.toBigDecimal()
 val bigDecimalFromDouble = 123.456.toBigDecimal()
 ```
 
-`Long`, `Int`, `Short`, `Byte` 
+`Long`, `Int`, `Short`, `Byte`
 ```kotlin
-val bigDecimalFromLong = 10.toLong().toBigDecimal() 
+val bigDecimalFromLong = 10.toLong().toBigDecimal()
 val bigDecimalFromInt = 10.toInt().toBigDecimal()
-val bigDecimalFromShort = 10.toShort().toBigDecimal() 
+val bigDecimalFromShort = 10.toShort().toBigDecimal()
 val bigDecimalFromByte = 10.toByte().toBigDecimal()
 ```
 
@@ -335,7 +364,7 @@ BigDecimal: 123.456
 
 ## toByteArray and fromByteArray
 
-Converts the BigInteger to and from big endian byte array.  
+Converts the BigInteger to and from big endian byte array.
 ```kotlin
 val bigIntOriginal = BigInteger.fromULong(ULong.MAX_VALUE)
 val byteArray = bigIntOriginal.toByteArray()
@@ -384,11 +413,11 @@ This is a counterpart to the Java BigDecimal MathContext and scale at the same t
 
 ```kotlin
 data class DecimalMode(val decimalPrecision : Long = 0, val roundingMode : RoundingMode = RoundingMode.NONE, val scale: Long = -1)
-``` 
+```
 
 `decimalPrecision` defines how many digits should significand have
 
-`roundingMode` defines rounding mode. 
+`roundingMode` defines rounding mode.
 
 ##### Decimal mode resolution
 
@@ -396,10 +425,10 @@ data class DecimalMode(val decimalPrecision : Long = 0, val roundingMode : Round
 
 * If a `DecimalMode` is set when creating a `BigDecimal` that mode will be used for all operations.
 
-* If two `BigDecimal`s have different `DecimalModes` with different RoundingModes an `ArithmeticException` will be thrown. 
+* If two `BigDecimal`s have different `DecimalModes` with different RoundingModes an `ArithmeticException` will be thrown.
 If the modes are same, but the precision is different, larger precision will be used.
 
-### Scale 
+### Scale
 
 Scale, or the number of digits to the right of the decimal, can also be specified.  Default is no
 scale, which puts no restriction on number of digits to the right of the decimal. When scale is
@@ -413,9 +442,9 @@ whether unlimited precision or limited precision, then these rules for scale of 
 * multiply - sum of the two scales</li>
 * divide - min of the two scales</li>
 
-##### Infinite precision  
+##### Infinite precision
 
-Precision 0 and roundingMode none attempt to provide infinite precisions. Exception is division (and exponentiation with negative parameter), where default precision is the sum of precisions of operands (or 6, if the sum is below 6). If result of the operation cannot fit inside precision and RoundingMode is NONE, `ArithmeticException` 
+Precision 0 and roundingMode none attempt to provide infinite precisions. Exception is division (and exponentiation with negative parameter), where default precision is the sum of precisions of operands (or 6, if the sum is below 6). If result of the operation cannot fit inside precision and RoundingMode is NONE, `ArithmeticException`
 will be thrown.
 
 Example from the tests:
@@ -477,11 +506,11 @@ ROUND_HALF_FLOOR|Round towards nearest integer, using towards negative infinity 
 
 ### Modular Integers
 
-Modular arithmetic operations are supported only between integers with the same modulo. 
+Modular arithmetic operations are supported only between integers with the same modulo.
 
 ## Creating Modular Integers
 
-First define the modulo you are going to use by getting an instance of the creator, and than 
+First define the modulo you are going to use by getting an instance of the creator, and than
 use that creator to create instances of modular integers
 
 ```kotlin
@@ -498,7 +527,7 @@ Otherwise, behavior is similar to normal integers
 
 ### Sources
 
-For examples of rounding modes consult [Comparison of approaches for rounding to an integer](https://en.wikipedia.org/wiki/Rounding) 
+For examples of rounding modes consult [Comparison of approaches for rounding to an integer](https://en.wikipedia.org/wiki/Rounding)
 on Wikipedia
 
 This library draws inspiration from libraries like Java BigInteger, GNU MP Arithmetic Library, Javolution JScience,
@@ -531,9 +560,37 @@ If you want to try building BigNum library yourself, those are the sources I wou
 ### Development environment
 If you are planning on contributing to the development of the library, you can set a local gradle variable
 in `gradle.properties` in your gradle home directory (i.e. on Linux ~/.gradle/gradle.properties) called
-`bignumPrimaryDevelopmentOs` to `linux`, `windows` or `mac` so that the gradle builds JVM and JS targets on your 
+`bignumPrimaryDevelopmentOs` to `linux`, `windows` or `mac` so that the gradle builds JVM and JS targets on your
 platform. The reason for this switch is that most of the test are run on JVM by comparing results to Java BigInteger/Decimal
 so they should be run on your main development OS to verify proper results, and can be skipped on other operating systems
 where you are developing that platform specific features.
 
 And thank you for contributing!
+
+## Attribution
+
+This prototype is a fork of
+[Kotlin Multiplatform BigNum](https://github.com/ionspin/kotlin-multiplatform-bignum), created by
+Ugljesa Jovanovic ([@ionspin](https://github.com/ionspin)) and released under the Apache License
+2.0. The original copyright notice is retained in every source file and in [NOTICE](NOTICE). See
+[THANKS.md](THANKS.md) for the contributors to the original project, and the upstream
+repository for its issue tracker, releases and documentation.
+
+## License
+
+```
+Copyright 2019 Ugljesa Jovanovic
+Modifications Copyright 2026 Open Health Stack Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
