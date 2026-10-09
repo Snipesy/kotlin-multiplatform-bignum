@@ -1,13 +1,11 @@
 *.iml
 .gradle
-/local.properties
-/.idea
+.idea
 .DS_Store
-*/build
-build/
-/captures
-/bignum/node_modules
-/buildSrc/out
-/bignum/node_modules
-zignum/
-.kotlin/
+build
+captures
+local.properties
+xcuserdata
+.kotlin
+#So we don't accidentally commit our private keys
+*.gpg

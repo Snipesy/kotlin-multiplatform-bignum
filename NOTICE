@@ -1,0 +1,6 @@
+Kotlin BigNum
+Copyright 2026 Open Health Stack Foundation
+
+This product is a fork of Kotlin Multiplatform BigNum
+(https://github.com/ionspin/kotlin-multiplatform-bignum),
+Copyright 2019 Ugljesa Jovanovic, licensed under the Apache License, Version 2.0.
