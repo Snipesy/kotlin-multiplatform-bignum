@@ -1,5 +1,6 @@
 import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeTest
 import org.jetbrains.kotlin.gradle.targets.js.testing.KotlinJsTest
+import org.jetbrains.kotlin.gradle.dsl.JsMainFunctionExecutionMode
 
 plugins {
     kotlin(PluginsDeps.multiplatform)
@@ -61,10 +62,11 @@ kotlin {
         compilations {
             this.forEach {
                 it.compileTaskProvider.configure {
-                    kotlinOptions.sourceMap = true
-                    kotlinOptions.metaInfo = true
-                    if (it.name == "main") {
-                        kotlinOptions.main = "call"
+                    compilerOptions {
+                        sourceMap.set(true)
+                        if (it.name == "main") {
+                            main.set(JsMainFunctionExecutionMode.CALL)
+                        }
                     }
                 }
             }
@@ -139,17 +141,10 @@ tasks {
     val hostOs = getHostOsName()
 
     create<Jar>("javadocJar") {
-        dependsOn(dokkaHtml)
         archiveClassifier.set("javadoc")
-        from(dokkaHtml.get().outputDirectory)
+        from(named("dokkaGeneratePublicationHtml"))
     }
 
-    dokkaHtml {
-        println("Dokka !")
-        dokkaSourceSets {
-
-        }
-    }
 
     val jvmTest by getting(Test::class) {
         testLogging {

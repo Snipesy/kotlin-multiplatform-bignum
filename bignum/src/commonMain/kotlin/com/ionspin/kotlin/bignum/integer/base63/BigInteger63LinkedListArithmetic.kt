@@ -1049,7 +1049,7 @@ internal object BigInteger63LinkedListArithmetic : BigIntegerList63Arithmetic {
 
     override fun parseForBase(number: String, base: Int): List<ULong> {
         var parsed = ZERO
-        number.toLowerCase().forEach { char ->
+        number.lowercase().forEach { char ->
             parsed = (parsed * base.toULong()) + (char.toDigit(base)).toULong()
         }
         return removeLeadingZeros(parsed)

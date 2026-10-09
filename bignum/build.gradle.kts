@@ -17,6 +17,8 @@
 
 @file:Suppress("UnstableApiUsage")
 
+import org.jetbrains.kotlin.gradle.dsl.JsMainFunctionExecutionMode
+
 plugins {
     kotlin(PluginsDeps.multiplatform)
     id(PluginsDeps.mavenPublish)
@@ -66,10 +68,11 @@ kotlin {
         compilations {
             this.forEach {
                 it.compileTaskProvider.configure {
-                    kotlinOptions.sourceMap = true
-                    kotlinOptions.metaInfo = true
-                    if (it.name == "main") {
-                        kotlinOptions.main = "call"
+                    compilerOptions {
+                        sourceMap.set(true)
+                        if (it.name == "main") {
+                            main.set(JsMainFunctionExecutionMode.CALL)
+                        }
                     }
                 }
             }
@@ -143,11 +146,12 @@ kotlin {
         }
 
         all {
-            languageSettings.enableLanguageFeature("InlineClasses")
-            languageSettings.optIn("expect-actual-classes")
             languageSettings.optIn("kotlin.ExperimentalUnsignedTypes")
             languageSettings.optIn("kotlin.ExperimentalStdlibApi")
         }
+    }
+    compilerOptions {
+        freeCompilerArgs.add("-Xexpect-actual-classes")
     }
 }
 
@@ -159,15 +163,10 @@ tasks {
     val hostOsName = getHostOsName()
 
     create<Jar>("javadocJar") {
-        dependsOn(dokkaHtml)
         archiveClassifier.set("javadoc")
-        from(dokkaHtml.get().outputDirectory)
+        from(named("dokkaGeneratePublicationHtml"))
     }
 
-    dokkaHtml {
-        dokkaSourceSets {
-        }
-    }
 
     val jvmTest by getting(Test::class) {
         testLogging {
