@@ -60,14 +60,27 @@ import kotlin.math.min
  */
 class BigDecimal
 private constructor(
-  _significand: BigInteger,
-  _exponent: Long = 0L,
-  _decimalMode: DecimalMode? = null,
+  _compact: Long,
+  _inflated: BigInteger?,
+  _exponent: Long,
+  _decimalMode: DecimalMode?,
+  _applyScale: Boolean = true,
 ) :
   BigNumber<BigDecimal>,
   CommonBigNumberOperations<BigDecimal>,
   NarrowingOperations<BigDecimal>,
   Comparable<Any> {
+
+  /**
+   * Builds from a [BigInteger] significand, storing it compactly when its magnitude fits in a
+   * single 63-bit word. Every single-word magnitude fits in a `Long`, so the only value that needs
+   * the inflated form is one with two or more words.
+   */
+  private constructor(
+    _significand: BigInteger,
+    _exponent: Long = 0L,
+    _decimalMode: DecimalMode? = null,
+  ) : this(compactOf(_significand), _significand, _exponent, _decimalMode)
 
   /**
    * Number of decimal digits in [significand]. Counting digits costs a division for large values,
@@ -81,36 +94,100 @@ private constructor(
     get() {
       var cached = precisionCache
       if (cached < 0L) {
-        cached = significand.numberOfDecimalDigits()
+        cached =
+          if (compact != CompactArithmetic.INFLATED) {
+            CompactArithmetic.digitCount(compact)
+          } else {
+            significand.numberOfDecimalDigits()
+          }
         precisionCache = cached
       }
       return cached
     }
 
+  /**
+   * The significand as a `Long`, or [CompactArithmetic.INFLATED] when it does not fit. Nearly all
+   * real-world decimals have fewer than 19 digits, so the arithmetic below works on this field and
+   * only falls back to [significand] when a result overflows.
+   */
+  private val compact: Long
+
+  /**
+   * The [BigInteger] form of the significand. Always set when [compact] is inflated, and filled on
+   * first use otherwise. A value computed twice under contention is identical, so no locking is
+   * needed.
+   */
+  private var inflatedCache: BigInteger?
+
   val significand: BigInteger
+    get() {
+      inflatedCache?.let {
+        return it
+      }
+      val materialised = BigInteger.fromLong(compact)
+      inflatedCache = materialised
+      return materialised
+    }
+
   val exponent: Long
   val decimalMode: DecimalMode?
 
+  private val isCompact: Boolean
+    get() = compact != CompactArithmetic.INFLATED
+
   init {
-    if (_decimalMode != null && _decimalMode.usingScale) {
-      val wrk = applyScale(_significand, _exponent, _decimalMode)
+    if (_applyScale && _decimalMode != null && _decimalMode.usingScale) {
+      val wrk =
+        if (_compact != CompactArithmetic.INFLATED) {
+          applyScaleCompact(_compact, _exponent, _decimalMode)
+            ?: applyScale(_inflated ?: BigInteger.fromLong(_compact), _exponent, _decimalMode)
+        } else {
+          applyScale(_inflated!!, _exponent, _decimalMode)
+        }
+      compact = wrk.compact
+      inflatedCache = wrk.inflatedCache
       if (wrk.isZero().not()) {
-        significand = wrk.significand
         exponent = wrk.exponent
-        val newPrecision = significand.numberOfDecimalDigits()
+        val newPrecision = wrk.precision
         precisionCache = newPrecision
         decimalMode = _decimalMode.copy(decimalPrecision = newPrecision)
       } else {
-        significand = wrk.significand
         exponent = wrk.exponent.times(_decimalMode.decimalPrecision + _decimalMode.scale)
         precisionCache = _decimalMode.decimalPrecision + _decimalMode.scale
         decimalMode = _decimalMode.copy(decimalPrecision = precisionCache)
       }
     } else {
-      significand = _significand
+      compact = _compact
+      inflatedCache = _inflated
       exponent = _exponent
       decimalMode = _decimalMode
     }
+  }
+
+  /** Same value with a different exponent or mode, keeping the compact form when there is one. */
+  private fun rebuild(
+    exponent: Long = this.exponent,
+    decimalMode: DecimalMode? = this.decimalMode,
+  ) = BigDecimal(compact, inflatedCache, exponent, decimalMode)
+
+  /** Whether the significand is currently held as a `Long`. Exposed for tests. */
+  internal fun isCompactForTesting(): Boolean = isCompact
+
+  /**
+   * The same value held only as a [BigInteger], with every cached field copied. Tests use it to
+   * check that the compact fast paths produce exactly what the BigInteger paths produce.
+   */
+  internal fun inflatedForTesting(): BigDecimal {
+    val copy =
+      BigDecimal(
+        CompactArithmetic.INFLATED,
+        significand,
+        exponent,
+        decimalMode,
+        _applyScale = false,
+      )
+    copy.precisionCache = precisionCache
+    return copy
   }
 
   /**
@@ -124,12 +201,54 @@ private constructor(
   val usingScale = scale >= 0
 
   companion object : BigNumber.Creator<BigDecimal> {
-    override val ZERO = BigDecimal(BigInteger.ZERO)
-    override val ONE = BigDecimal(BigInteger.ONE)
-    override val TWO = BigDecimal(BigInteger.TWO)
-    override val TEN = BigDecimal(BigInteger.TEN, _exponent = 1)
+    override val ZERO = fromCompact(0L, 0L, null)
+    override val ONE = fromCompact(1L, 0L, null)
+    override val TWO = fromCompact(2L, 0L, null)
+    override val TEN = fromCompact(10L, 1L, null)
 
     var useToStringExpanded: Boolean = false
+
+    /** Lets tests compare the single-pass parser against the general one on the same input. */
+    internal var compactParseEnabledForTesting: Boolean = true
+
+    /**
+     * The compact form of [bigInteger], or [CompactArithmetic.INFLATED] when its magnitude needs
+     * more than one 63-bit word.
+     */
+    private fun compactOf(bigInteger: BigInteger): Long {
+      val magnitude = bigInteger.magnitude
+      return when (magnitude.size) {
+        0 -> 0L
+        1 -> {
+          val word = magnitude[0]
+          if (word > Long.MAX_VALUE.toULong()) {
+            CompactArithmetic.INFLATED
+          } else {
+            word.toLong() * bigInteger.signum()
+          }
+        }
+        else -> CompactArithmetic.INFLATED
+      }
+    }
+
+    private fun fromCompact(significand: Long, exponent: Long, decimalMode: DecimalMode?) =
+      BigDecimal(significand, null, exponent, decimalMode)
+
+    /**
+     * Compact-or-fallback constructor: builds from a `Long` when [significand] is not inflated, and
+     * otherwise from the supplied [BigInteger] producer.
+     */
+    private inline fun fromCompactOr(
+      significand: Long,
+      exponent: Long,
+      decimalMode: DecimalMode?,
+      inflated: () -> BigInteger,
+    ): BigDecimal =
+      if (significand != CompactArithmetic.INFLATED) {
+        fromCompact(significand, exponent, decimalMode)
+      } else {
+        BigDecimal(inflated(), exponent, decimalMode)
+      }
 
     /**
      * Powers of 10 which can be represented exactly in `double`. From java BigDecimal, hopefully
@@ -199,6 +318,307 @@ private constructor(
       LESS_THAN_FIVE,
       MORE_THAN_FIVE,
       ZERO,
+    }
+
+    // ── Compact (Long) rounding ──────────────────────────────────────────────
+    //
+    // Each function below mirrors the BigInteger function of the same name step for step, and
+    // returns null (or INFLATED) when an intermediate value would not fit in a Long. The caller
+    // then runs the BigInteger version from scratch, so a fallback never produces a partially
+    // compact result.
+
+    /** [roundOrDont] on a compact significand, or null when the rounding does not fit. */
+    private fun roundOrDontCompact(
+      significand: Long,
+      exponent: Long,
+      decimalMode: DecimalMode,
+    ): BigDecimal? {
+      return if (decimalMode.isPrecisionUnlimited) {
+        fromCompact(significand, exponent, null)
+      } else {
+        roundSignificandCompact(significand, exponent, decimalMode)
+      }
+    }
+
+    /** [roundOrDont] that keeps the compact form of [value] when it has one. */
+    private fun roundOrDont(
+      value: BigDecimal,
+      exponent: Long,
+      decimalMode: DecimalMode,
+    ): BigDecimal {
+      if (value.isCompact) {
+        roundOrDontCompact(value.compact, exponent, decimalMode)?.let {
+          return it
+        }
+      }
+      return roundOrDont(value.significand, exponent, decimalMode)
+    }
+
+    private fun determineDeciderCompact(discarded: Long): SignificantDecider {
+      val scale =
+        CompactArithmetic.powerOfTen((CompactArithmetic.digitCount(discarded) - 1).toInt())
+      val significant = (discarded / scale).let { if (it < 0) -it else it }
+      val rest = (discarded % scale).let { if (it < 0) -it else it }
+      return when {
+        significant == 5L -> {
+          if (rest == 0L) {
+            SignificantDecider.FIVE
+          } else {
+            SignificantDecider.MORE_THAN_FIVE
+          }
+        }
+        significant > 5L -> SignificantDecider.MORE_THAN_FIVE
+        significant < 5L -> SignificantDecider.LESS_THAN_FIVE
+        else -> throw RuntimeException("Couldn't determine decider")
+      }
+    }
+
+    /** [roundDiscarded] on compact values, or INFLATED when a step does not fit. */
+    private fun roundDiscardedCompact(
+      significand: Long,
+      discarded: Long,
+      decimalMode: DecimalMode,
+    ): Long {
+      val toDiscard = CompactArithmetic.digitCount(significand) - decimalMode.decimalPrecision
+      val result: Long
+      val remainder: Long
+      if (toDiscard > 0) {
+        if (toDiscard > CompactArithmetic.MAX_POWER_OF_TEN) {
+          return CompactArithmetic.INFLATED
+        }
+        val divisor = CompactArithmetic.powerOfTen(toDiscard.toInt())
+        result = significand / divisor
+        remainder = CompactArithmetic.add(significand % divisor, discarded / divisor)
+        if (remainder == CompactArithmetic.INFLATED) {
+          return CompactArithmetic.INFLATED
+        }
+      } else {
+        result = significand
+        remainder = discarded
+      }
+      val decider = determineDeciderCompact(remainder)
+      return roundWithDeciderCompact(
+        result,
+        decimalMode.roundingMode,
+        CompactArithmetic.signOf(significand),
+        decider,
+        CompactArithmetic.isEven(result),
+      )
+    }
+
+    /** [roundWithDecider] on a compact value, or INFLATED if the adjustment overflows. */
+    private fun roundWithDeciderCompact(
+      numberToRound: Long,
+      roundingMode: RoundingMode,
+      sign: Sign,
+      decider: SignificantDecider,
+      isEven: Boolean,
+    ): Long {
+      if (decider == SignificantDecider.ZERO) {
+        return numberToRound
+      }
+      val up = CompactArithmetic.add(numberToRound, 1L)
+      val down = CompactArithmetic.subtract(numberToRound, 1L)
+      return when (roundingMode) {
+        RoundingMode.AWAY_FROM_ZERO -> if (sign == Sign.POSITIVE) up else down
+        RoundingMode.TOWARDS_ZERO -> numberToRound
+        RoundingMode.CEILING -> if (sign == Sign.POSITIVE) up else numberToRound
+        RoundingMode.FLOOR -> if (sign == Sign.POSITIVE) numberToRound else down
+        RoundingMode.ROUND_HALF_AWAY_FROM_ZERO ->
+          when (sign) {
+            Sign.POSITIVE -> if (decider != SignificantDecider.LESS_THAN_FIVE) up else numberToRound
+            Sign.NEGATIVE ->
+              if (decider != SignificantDecider.LESS_THAN_FIVE) down else numberToRound
+            Sign.ZERO -> numberToRound
+          }
+        RoundingMode.ROUND_HALF_TOWARDS_ZERO ->
+          when (sign) {
+            Sign.POSITIVE -> if (decider == SignificantDecider.MORE_THAN_FIVE) up else numberToRound
+            Sign.NEGATIVE ->
+              if (decider == SignificantDecider.MORE_THAN_FIVE) down else numberToRound
+            Sign.ZERO -> numberToRound
+          }
+        RoundingMode.ROUND_HALF_CEILING ->
+          when (sign) {
+            Sign.POSITIVE -> if (decider != SignificantDecider.LESS_THAN_FIVE) up else numberToRound
+            Sign.NEGATIVE ->
+              if (decider == SignificantDecider.MORE_THAN_FIVE) down else numberToRound
+            Sign.ZERO -> numberToRound
+          }
+        RoundingMode.ROUND_HALF_FLOOR ->
+          when (sign) {
+            Sign.POSITIVE -> if (decider == SignificantDecider.MORE_THAN_FIVE) up else numberToRound
+            Sign.NEGATIVE ->
+              if (decider != SignificantDecider.LESS_THAN_FIVE) down else numberToRound
+            Sign.ZERO -> numberToRound
+          }
+        RoundingMode.ROUND_HALF_TO_EVEN ->
+          when (decider) {
+            SignificantDecider.FIVE ->
+              if (isEven) {
+                numberToRound
+              } else {
+                when (sign) {
+                  Sign.POSITIVE -> up
+                  Sign.NEGATIVE -> down
+                  Sign.ZERO -> numberToRound
+                }
+              }
+            SignificantDecider.MORE_THAN_FIVE ->
+              when (sign) {
+                Sign.POSITIVE -> up
+                Sign.NEGATIVE -> down
+                Sign.ZERO -> numberToRound
+              }
+            else -> numberToRound
+          }
+        RoundingMode.ROUND_HALF_TO_ODD ->
+          when (decider) {
+            SignificantDecider.FIVE ->
+              if (isEven.not()) {
+                numberToRound
+              } else {
+                when (sign) {
+                  Sign.POSITIVE -> up
+                  Sign.NEGATIVE -> down
+                  Sign.ZERO -> numberToRound
+                }
+              }
+            SignificantDecider.MORE_THAN_FIVE ->
+              when (sign) {
+                Sign.POSITIVE -> up
+                Sign.NEGATIVE -> down
+                Sign.ZERO -> numberToRound
+              }
+            SignificantDecider.LESS_THAN_FIVE -> numberToRound
+            SignificantDecider.ZERO -> numberToRound
+          }
+        RoundingMode.NONE ->
+          throw ArithmeticException(
+            "Non-terminating result of division operation " +
+              "(i.e. 1/3 = 0.3333... library needs to know when to stop and how to round up at that point). " +
+              "Specify rounding mode inside your decimal mode."
+          )
+      }
+    }
+
+    /** [handleZeroRounding] on a compact value, or null if the adjustment overflows. */
+    private fun handleZeroRoundingCompact(
+      significand: Long,
+      exponent: Long,
+      decimalMode: DecimalMode,
+    ): BigDecimal? {
+      val adjusted =
+        when {
+          significand > 0L ->
+            when (decimalMode.roundingMode) {
+              RoundingMode.CEILING,
+              RoundingMode.AWAY_FROM_ZERO -> CompactArithmetic.add(significand, 1L)
+              else -> significand
+            }
+          significand < 0L ->
+            when (decimalMode.roundingMode) {
+              RoundingMode.FLOOR,
+              RoundingMode.AWAY_FROM_ZERO -> CompactArithmetic.subtract(significand, 1L)
+              else -> significand
+            }
+          else -> significand
+        }
+      if (adjusted == CompactArithmetic.INFLATED) {
+        return null
+      }
+      if (adjusted == significand) {
+        return fromCompact(significand, exponent, decimalMode)
+      }
+      val exponentModifier =
+        CompactArithmetic.digitCount(adjusted) - CompactArithmetic.digitCount(significand)
+      return fromCompact(adjusted, exponent + exponentModifier, decimalMode)
+    }
+
+    /** [roundSignificand] on a compact value, or null when the rounding does not fit in a Long. */
+    private fun roundSignificandCompact(
+      significand: Long,
+      exponent: Long,
+      decimalMode: DecimalMode,
+    ): BigDecimal? {
+      if (significand == 0L) {
+        return fromCompact(0L, exponent, decimalMode)
+      }
+      val significandDigits = CompactArithmetic.digitCount(significand)
+      val desiredPrecision =
+        if (decimalMode.usingScale) {
+          decimalMode.decimalPrecision + decimalMode.scale
+        } else {
+          decimalMode.decimalPrecision
+        }
+      return when {
+        desiredPrecision > significandDigits && !decimalMode.usingScale -> {
+          val extendedSignificand =
+            CompactArithmetic.scaleByPowerOfTen(significand, desiredPrecision - significandDigits)
+          if (extendedSignificand == CompactArithmetic.INFLATED) {
+            return null
+          }
+          fromCompact(extendedSignificand, exponent, decimalMode)
+        }
+
+        desiredPrecision < significandDigits -> {
+          val dropped = significandDigits - desiredPrecision
+          if (dropped > CompactArithmetic.MAX_POWER_OF_TEN) {
+            return null
+          }
+          val divisor = CompactArithmetic.powerOfTen(dropped.toInt())
+          val quotient = significand / divisor
+          val remainder = significand % divisor
+          if (remainder == 0L) {
+            return fromCompact(quotient, exponent, decimalMode)
+          }
+          // Check if remainder was .0XXX if so handle it
+          if (
+            significandDigits ==
+              CompactArithmetic.digitCount(quotient) + CompactArithmetic.digitCount(remainder)
+          ) {
+            val newSignificand = roundDiscardedCompact(quotient, remainder, decimalMode)
+            if (newSignificand == CompactArithmetic.INFLATED) {
+              return null
+            }
+            val exponentModifier =
+              CompactArithmetic.digitCount(newSignificand) - CompactArithmetic.digitCount(quotient)
+            fromCompact(newSignificand, exponent + exponentModifier, decimalMode)
+          } else {
+            handleZeroRoundingCompact(quotient, exponent, decimalMode)
+          }
+        }
+
+        else -> {
+          fromCompact(significand, exponent, decimalMode)
+        }
+      }
+    }
+
+    /** [applyScale] on a compact value, or null when a step does not fit in a Long. */
+    private fun applyScaleCompact(
+      significand: Long,
+      exponent: Long,
+      decimalMode: DecimalMode,
+    ): BigDecimal? {
+      val workMode =
+        if (exponent >= 0) {
+          DecimalMode(exponent + decimalMode.scale + 1, decimalMode.roundingMode)
+        } else {
+          DecimalMode(decimalMode.scale + 1, decimalMode.roundingMode)
+        }
+      if (exponent >= 0) {
+        return roundSignificandCompact(significand, exponent, workMode)
+      }
+      val signum = CompactArithmetic.signumOf(significand)
+      val nudge =
+        if (decimalMode.roundingMode == RoundingMode.ROUND_HALF_TO_EVEN) signum * 2 else signum
+      val temp = fromCompact(significand, exponent, null) + nudge
+      if (!temp.isCompact) {
+        return null
+      }
+      val rounded = roundSignificandCompact(temp.compact, temp.exponent, workMode) ?: return null
+      return rounded - nudge
     }
 
     private fun determineDecider(discarded: BigInteger): SignificantDecider {
@@ -619,8 +1039,7 @@ private constructor(
      * @return BigDecimal representing input
      */
     fun fromBigDecimal(bigDecimal: BigDecimal, decimalMode: DecimalMode? = null): BigDecimal {
-      return BigDecimal(bigDecimal.significand, bigDecimal.exponent, decimalMode)
-        .roundSignificand(decimalMode)
+      return bigDecimal.rebuild(decimalMode = decimalMode).roundSignificand(decimalMode)
     }
 
     /**
@@ -636,6 +1055,11 @@ private constructor(
         .roundSignificand(decimalMode)
     }
 
+    /** A compact value with its exponent set so the decimal point follows the first digit. */
+    private fun fromCompactValue(value: Long, decimalMode: DecimalMode?): BigDecimal =
+      fromCompact(value, CompactArithmetic.digitCount(value) - 1, decimalMode)
+        .roundSignificand(decimalMode)
+
     /**
      * Convert a Long into a BigDecimal.
      *
@@ -645,9 +1069,12 @@ private constructor(
      * @return BigDecimal representing input
      */
     fun fromLong(long: Long, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromLong(long)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
+      if (long == CompactArithmetic.INFLATED) {
+        val bigint = BigInteger.fromLong(long)
+        return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
+          .roundSignificand(decimalMode)
+      }
+      return fromCompactValue(long, decimalMode)
     }
 
     /**
@@ -659,9 +1086,12 @@ private constructor(
      * @return BigDecimal representing input
      */
     fun fromULong(uLong: ULong, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromULong(uLong)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
+      if (uLong > Long.MAX_VALUE.toULong()) {
+        val bigint = BigInteger.fromULong(uLong)
+        return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
+          .roundSignificand(decimalMode)
+      }
+      return fromCompactValue(uLong.toLong(), decimalMode)
     }
 
     /**
@@ -672,11 +1102,8 @@ private constructor(
      * @param int Int value to conver
      * @return BigDecimal representing input
      */
-    fun fromInt(int: Int, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromInt(int)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
-    }
+    fun fromInt(int: Int, decimalMode: DecimalMode? = null): BigDecimal =
+      fromCompactValue(int.toLong(), decimalMode)
 
     /**
      * Convert a Int into a BigDecimal.
@@ -686,11 +1113,8 @@ private constructor(
      * @param uInt Int value to conver
      * @return BigDecimal representing input
      */
-    fun fromUInt(uInt: UInt, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromUInt(uInt)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
-    }
+    fun fromUInt(uInt: UInt, decimalMode: DecimalMode? = null): BigDecimal =
+      fromCompactValue(uInt.toLong(), decimalMode)
 
     /**
      * Convert a Short into a BigDecimal.
@@ -700,11 +1124,8 @@ private constructor(
      * @param uShort Short value to conver
      * @return BigDecimal representing input
      */
-    fun fromUShort(uShort: UShort, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromUShort(uShort)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
-    }
+    fun fromUShort(uShort: UShort, decimalMode: DecimalMode? = null): BigDecimal =
+      fromCompactValue(uShort.toLong(), decimalMode)
 
     /**
      * Convert a Short into a BigDecimal.
@@ -714,11 +1135,8 @@ private constructor(
      * @param short Short value to conver
      * @return BigDecimal representing input
      */
-    fun fromShort(short: Short, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromShort(short)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
-    }
+    fun fromShort(short: Short, decimalMode: DecimalMode? = null): BigDecimal =
+      fromCompactValue(short.toLong(), decimalMode)
 
     /**
      * Convert a Byte into a BigDecimal.
@@ -728,11 +1146,8 @@ private constructor(
      * @param uByte Byte value to conver
      * @return BigDecimal representing input
      */
-    fun fromUByte(uByte: UByte, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromUByte(uByte)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
-    }
+    fun fromUByte(uByte: UByte, decimalMode: DecimalMode? = null): BigDecimal =
+      fromCompactValue(uByte.toLong(), decimalMode)
 
     /**
      * Convert a Byte into a BigDecimal.
@@ -742,11 +1157,8 @@ private constructor(
      * @param byte Byte value to conver
      * @return BigDecimal representing input
      */
-    fun fromByte(byte: Byte, decimalMode: DecimalMode? = null): BigDecimal {
-      val bigint = BigInteger.fromByte(byte)
-      return BigDecimal(bigint, bigint.numberOfDecimalDigits() - 1, decimalMode)
-        .roundSignificand(decimalMode)
-    }
+    fun fromByte(byte: Byte, decimalMode: DecimalMode? = null): BigDecimal =
+      fromCompactValue(byte.toLong(), decimalMode)
 
     /**
      * Convert a Long into a BigDecimal, but use supplied value directly as significant.
@@ -757,7 +1169,8 @@ private constructor(
      * @return BigDecimal representing input
      */
     fun fromLongAsSignificand(long: Long, decimalMode: DecimalMode? = null) =
-      BigDecimal(BigInteger.fromLong(long), 0L, decimalMode).roundSignificand(decimalMode)
+      fromCompactOr(long, 0L, decimalMode) { BigInteger.fromLong(long) }
+        .roundSignificand(decimalMode)
 
     /**
      * Convert a Int into a BigDecimal, but use supplied value directly as significant.
@@ -768,7 +1181,7 @@ private constructor(
      * @return BigDecimal representing input
      */
     fun fromIntAsSignificand(int: Int, decimalMode: DecimalMode? = null) =
-      BigDecimal(BigInteger.fromInt(int), 0L, decimalMode).roundSignificand(decimalMode)
+      fromCompact(int.toLong(), 0L, decimalMode).roundSignificand(decimalMode)
 
     /**
      * Convert a Short into a BigDecimal, but use supplied value directly as significant.
@@ -779,7 +1192,7 @@ private constructor(
      * @return BigDecimal representing input
      */
     fun fromShortAsSignificand(short: Short, decimalMode: DecimalMode? = null) =
-      BigDecimal(BigInteger.fromShort(short), 0L, decimalMode).roundSignificand(decimalMode)
+      fromCompact(short.toLong(), 0L, decimalMode).roundSignificand(decimalMode)
 
     /**
      * Convert a Short into a BigDecimal, but use supplied value directly as significant.
@@ -790,7 +1203,7 @@ private constructor(
      * @return BigDecimal representing input
      */
     fun fromByteAsSignificand(byte: Byte, decimalMode: DecimalMode? = null) =
-      BigDecimal(BigInteger.fromByte(byte), 0L, decimalMode).roundSignificand(decimalMode)
+      fromCompact(byte.toLong(), 0L, decimalMode).roundSignificand(decimalMode)
 
     /**
      * Convert a float into a BigDecimal
@@ -845,8 +1258,8 @@ private constructor(
       exponent: Long,
       decimalMode: DecimalMode? = null,
     ): BigDecimal {
-      val bigint = BigInteger.fromLong(long)
-      return BigDecimal(bigint, exponent, decimalMode).roundSignificand(decimalMode)
+      return fromCompactOr(long, exponent, decimalMode) { BigInteger.fromLong(long) }
+        .roundSignificand(decimalMode)
     }
 
     /** Create BigDecimal from Int significand and BigInteger exponent */
@@ -855,8 +1268,7 @@ private constructor(
       exponent: Long,
       decimalMode: DecimalMode? = null,
     ): BigDecimal {
-      val bigint = BigInteger.fromInt(int)
-      return BigDecimal(bigint, exponent, decimalMode).roundSignificand(decimalMode)
+      return fromCompact(int.toLong(), exponent, decimalMode).roundSignificand(decimalMode)
     }
 
     /** Create BigDecimal from Short significand and BigInteger exponent */
@@ -865,8 +1277,7 @@ private constructor(
       exponent: Long,
       decimalMode: DecimalMode? = null,
     ): BigDecimal {
-      val bigint = BigInteger.fromShort(short)
-      return BigDecimal(bigint, exponent, decimalMode).roundSignificand(decimalMode)
+      return fromCompact(short.toLong(), exponent, decimalMode).roundSignificand(decimalMode)
     }
 
     /** Create BigDecimal from Short significand and BigInteger exponent */
@@ -875,8 +1286,7 @@ private constructor(
       exponent: Long,
       decimalMode: DecimalMode? = null,
     ): BigDecimal {
-      val bigint = BigInteger.fromByte(byte)
-      return BigDecimal(bigint, exponent, decimalMode).roundSignificand(decimalMode)
+      return fromCompact(byte.toLong(), exponent, decimalMode).roundSignificand(decimalMode)
     }
 
     /**
@@ -1023,6 +1433,11 @@ private constructor(
       if (floatingPointString.isEmpty()) {
         throw ArithmeticException("Empty string is not a valid decimal number")
       }
+      if (compactParseEnabledForTesting) {
+        parseCompactPlain(floatingPointString, decimalMode)?.let {
+          return it
+        }
+      }
       if (floatingPointString.contains('E', true)) {
         // Sci notation
         val split =
@@ -1090,7 +1505,22 @@ private constructor(
             }
             val leftTruncated = left.substring(leftFirstNonZero, left.length)
             val rightTruncated = right.substring(0, rightLastNonZero + 1)
-            var significand = BigInteger.parseString(leftTruncated + rightTruncated, 10)
+            val digitString = leftTruncated + rightTruncated
+            val compactMagnitude = CompactArithmetic.parseDigits(digitString)
+            if (compactMagnitude != CompactArithmetic.INFLATED) {
+              val compactSignificand =
+                if (sign == Sign.NEGATIVE) -compactMagnitude else compactMagnitude
+              val compactExponent =
+                if (leftTruncated != "0") {
+                  exponent + leftTruncated.length - 1
+                } else {
+                  exponent -
+                    (rightTruncated.length - CompactArithmetic.digitCount(compactSignificand)) -
+                    1
+                }
+              return fromCompact(compactSignificand, compactExponent, decimalMode)
+            }
+            var significand = BigInteger.parseString(digitString, 10)
 
             if (significand == BigInteger.ZERO) {
               sign = Sign.ZERO
@@ -1154,13 +1584,20 @@ private constructor(
               }
               val leftTruncated = left.substring(leftFirstNonZero, left.length)
               val rightTruncated = right.substring(0, rightLastNonZero + 1)
-              var significand = BigInteger.parseString(leftTruncated + rightTruncated, 10)
               val exponent =
                 if (leftTruncated.isNotEmpty() && leftTruncated[0] != '0') {
                   leftTruncated.length - 1
                 } else {
                   (rightTruncated.indexOfFirst { it != '0' } + 1) * -1
                 }
+              val digitString = leftTruncated + rightTruncated
+              val compactMagnitude = CompactArithmetic.parseDigits(digitString)
+              if (compactMagnitude != CompactArithmetic.INFLATED) {
+                val compactSignificand =
+                  if (sign == Sign.NEGATIVE) -compactMagnitude else compactMagnitude
+                return fromCompact(compactSignificand, exponent.toLong(), decimalMode)
+              }
+              var significand = BigInteger.parseString(digitString, 10)
 
               if (significand == BigInteger.ZERO) {
                 sign = Sign.ZERO
@@ -1177,6 +1614,18 @@ private constructor(
               )
           }
         } else {
+          val negative = floatingPointString[0] == '-'
+          val unsignedStart = if (negative || floatingPointString[0] == '+') 1 else 0
+          val compactMagnitude =
+            CompactArithmetic.parseDigits(floatingPointString.substring(unsignedStart))
+          if (compactMagnitude != CompactArithmetic.INFLATED) {
+            val compactSignificand = if (negative) -compactMagnitude else compactMagnitude
+            return fromCompact(
+              compactSignificand,
+              CompactArithmetic.digitCount(compactSignificand) - 1,
+              decimalMode,
+            )
+          }
           val significand = BigInteger.parseString(floatingPointString, 10)
           return BigDecimal(
             significand,
@@ -1185,6 +1634,93 @@ private constructor(
           )
         }
       }
+    }
+
+    /**
+     * Single-pass parse of the plain `[+-]digits[.digits]` form into a compact value, with the same
+     * truncation and exponent rules as the general parser below. Returns null for anything else,
+     * including inputs with more than 18 significant characters, and the general parser then
+     * accepts or rejects them exactly as before.
+     */
+    private fun parseCompactPlain(input: String, decimalMode: DecimalMode?): BigDecimal? {
+      val length = input.length
+      var index = 0
+      val negative = input[0] == '-'
+      if (negative || input[0] == '+') {
+        index++
+      }
+      if (index == length) {
+        return null
+      }
+      val leftStart = index
+      while (index < length && input[index] != '.') {
+        val char = input[index]
+        if (char < '0' || char > '9') {
+          return null
+        }
+        index++
+      }
+      val leftEnd = index
+      if (index == length) {
+        // Plain integer.
+        val digits = leftEnd - leftStart
+        if (digits == 0 || digits > CompactArithmetic.MAX_POWER_OF_TEN) {
+          return null
+        }
+        var value = 0L
+        for (i in leftStart until leftEnd) {
+          value = value * 10L + (input[i] - '0')
+        }
+        val signed = if (negative) -value else value
+        return fromCompact(signed, CompactArithmetic.digitCount(signed) - 1, decimalMode)
+      }
+      index++
+      val rightStart = index
+      while (index < length) {
+        val char = input[index]
+        if (char < '0' || char > '9') {
+          return null
+        }
+        index++
+      }
+      val rightEnd = length
+      // Leading zeros of the integer part are dropped unless it is all zeros.
+      var leftFirstNonZero = leftStart
+      while (leftFirstNonZero < leftEnd && input[leftFirstNonZero] == '0') {
+        leftFirstNonZero++
+      }
+      val leftTruncatedStart = if (leftFirstNonZero == leftEnd) leftStart else leftFirstNonZero
+      val leftTruncatedLength = leftEnd - leftTruncatedStart
+      // Trailing zeros of the fraction are dropped unless it is all zeros.
+      var rightLastNonZero = rightEnd - 1
+      while (rightLastNonZero >= rightStart && input[rightLastNonZero] == '0') {
+        rightLastNonZero--
+      }
+      val rightTruncatedEnd = if (rightLastNonZero < rightStart) rightEnd else rightLastNonZero + 1
+      val rightTruncatedLength = rightTruncatedEnd - rightStart
+      val totalLength = leftTruncatedLength + rightTruncatedLength
+      if (totalLength == 0 || totalLength > CompactArithmetic.MAX_POWER_OF_TEN) {
+        return null
+      }
+      var value = 0L
+      for (i in leftTruncatedStart until leftEnd) {
+        value = value * 10L + (input[i] - '0')
+      }
+      for (i in rightStart until rightTruncatedEnd) {
+        value = value * 10L + (input[i] - '0')
+      }
+      val exponent =
+        if (leftTruncatedLength > 0 && input[leftTruncatedStart] != '0') {
+          (leftTruncatedLength - 1).toLong()
+        } else {
+          var firstNonZero = rightStart
+          while (firstNonZero < rightTruncatedEnd && input[firstNonZero] == '0') {
+            firstNonZero++
+          }
+          if (firstNonZero == rightTruncatedEnd) 0L else -((firstNonZero - rightStart) + 1).toLong()
+        }
+      val signed = if (negative) -value else value
+      return fromCompact(signed, exponent, decimalMode)
     }
 
     private fun resolveDecimalMode(
@@ -1242,18 +1778,17 @@ private constructor(
           scale,
         )
       }
-    return BigDecimal(significand, exponent, mode)
+    return rebuild(decimalMode = mode)
   }
 
   fun removeScale(): BigDecimal {
-    return BigDecimal(
-      significand,
-      exponent,
-      DecimalMode(
-        decimalMode?.decimalPrecision ?: 0,
-        decimalMode?.roundingMode ?: RoundingMode.NONE,
-        -1,
-      ),
+    return rebuild(
+      decimalMode =
+        DecimalMode(
+          decimalMode?.decimalPrecision ?: 0,
+          decimalMode?.roundingMode ?: RoundingMode.NONE,
+          -1,
+        )
     )
   }
 
@@ -1281,10 +1816,15 @@ private constructor(
   fun add(other: BigDecimal, decimalMode: DecimalMode? = null): BigDecimal {
     val resolvedDecimalMode = resolveDecimalMode(this.decimalMode, other.decimalMode, decimalMode)
     if (this.isZero()) {
-      return roundOrDont(other.significand, other.exponent, resolvedDecimalMode)
+      return roundOrDont(other, other.exponent, resolvedDecimalMode)
     }
     if (other.isZero()) {
-      return roundOrDont(this.significand, this.exponent, resolvedDecimalMode)
+      return roundOrDont(this, this.exponent, resolvedDecimalMode)
+    }
+    if (isCompact && other.isCompact) {
+      addOrSubtractCompact(other, resolvedDecimalMode, false, resolvedDecimalMode.usingScale)?.let {
+        return it
+      }
     }
     val (first, second, _) = bringSignificandToSameExponent(this, other)
     // Temporary way to detect a carry happened, proper solution is to add
@@ -1339,10 +1879,20 @@ private constructor(
     val resolvedDecimalMode = resolveDecimalMode(this.decimalMode, other.decimalMode, decimalMode)
 
     if (this.isZero()) {
-      return roundOrDont(other.significand.negate(), other.exponent, resolvedDecimalMode)
+      return if (other.isCompact) {
+        roundOrDontCompact(-other.compact, other.exponent, resolvedDecimalMode)
+          ?: roundOrDont(other.significand.negate(), other.exponent, resolvedDecimalMode)
+      } else {
+        roundOrDont(other.significand.negate(), other.exponent, resolvedDecimalMode)
+      }
     }
     if (other.isZero()) {
-      return roundOrDont(this.significand, this.exponent, resolvedDecimalMode)
+      return roundOrDont(this, this.exponent, resolvedDecimalMode)
+    }
+    if (isCompact && other.isCompact) {
+      addOrSubtractCompact(other, resolvedDecimalMode, true, usingScale)?.let {
+        return it
+      }
     }
 
     val (first, second, _) = bringSignificandToSameExponent(this, other)
@@ -1397,6 +1947,29 @@ private constructor(
    */
   fun multiply(other: BigDecimal, decimalMode: DecimalMode? = null): BigDecimal {
     val resolvedDecimalMode = resolveDecimalMode(this.decimalMode, other.decimalMode, decimalMode)
+    if (isCompact && other.isCompact) {
+      val product = CompactArithmetic.multiply(compact, other.compact)
+      if (product != CompactArithmetic.INFLATED) {
+        val newSignificandNumOfDigit = CompactArithmetic.digitCount(product)
+        val moveExponent =
+          newSignificandNumOfDigit -
+            (CompactArithmetic.digitCount(compact) + CompactArithmetic.digitCount(other.compact))
+        val newExponent = this.exponent + other.exponent + moveExponent + 1
+        val rounded =
+          if (resolvedDecimalMode.usingScale) {
+            roundOrDontCompact(
+              product,
+              newExponent,
+              resolvedDecimalMode.copy(decimalPrecision = newSignificandNumOfDigit),
+            )
+          } else {
+            roundOrDontCompact(product, newExponent, resolvedDecimalMode)
+          }
+        if (rounded != null) {
+          return rounded
+        }
+      }
+    }
     // Temporary way to detect a carry happened, proper solution is to add
     // methods that return information about carry in arithmetic classes, this way it's going
     // to be rather slow
@@ -1501,6 +2074,11 @@ private constructor(
     }
 
     val resolvedDecimalMode = resolveDecimalMode(this.decimalMode, other.decimalMode, decimalMode)
+    if (isCompact && other.isCompact) {
+      divideCompact(other, resolvedDecimalMode)?.let {
+        return it
+      }
+    }
     if (resolvedDecimalMode.isPrecisionUnlimited && resolvedDecimalMode.usingScale.not()) {
       val newExponent = this.exponent - other.exponent
       val power = (other.precision * 2 + 6)
@@ -1610,38 +2188,210 @@ private constructor(
     return if (resolvedDecimalMode.usingScale) {
       val roundedQuotient =
         roundOrDont(
-          quotientWithoutDecimal.significand,
+          quotientWithoutDecimal,
           quotientWithoutDecimal.exponent,
-          resolvedDecimalMode.copy(decimalPrecision = quotient.significand.numberOfDecimalDigits()),
+          resolvedDecimalMode.copy(decimalPrecision = quotient.significandDigits()),
         )
       val roundedRemainder =
         roundOrDont(
-          remainder.significand,
+          remainder,
           remainder.exponent,
-          resolvedDecimalMode.copy(
-            decimalPrecision = remainder.significand.numberOfDecimalDigits()
-          ),
+          resolvedDecimalMode.copy(decimalPrecision = remainder.significandDigits()),
         )
       Pair(roundedQuotient, roundedRemainder)
     } else {
       val roundedQuotient =
-        roundOrDont(
-          quotientWithoutDecimal.significand,
-          quotientWithoutDecimal.exponent,
-          resolvedDecimalMode,
-        )
-      val roundedRemainder =
-        roundOrDont(
-          remainder.significand,
-          remainder.exponent,
-          resolvedDecimalMode,
-        )
+        roundOrDont(quotientWithoutDecimal, quotientWithoutDecimal.exponent, resolvedDecimalMode)
+      val roundedRemainder = roundOrDont(remainder, remainder.exponent, resolvedDecimalMode)
       Pair(roundedQuotient, roundedRemainder)
     }
   }
 
   override fun isZero(): Boolean {
+    if (isCompact) {
+      return compact == 0L
+    }
     return significand.isZero()
+  }
+
+  /** Digits in the significand itself, independent of any eagerly cached scaled precision. */
+  private fun significandDigits(): Long =
+    if (isCompact) CompactArithmetic.digitCount(compact) else significand.numberOfDecimalDigits()
+
+  // ── Compact (Long) arithmetic ─────────────────────────────────────────────
+  //
+  // Mirrors of the BigInteger operations below. Each returns null when any intermediate value
+  // would not fit in a Long, and the caller then runs the BigInteger version from scratch.
+
+  /**
+   * [add] or [subtract] when both operands are compact. [scaleToDigits] reproduces the mode copy
+   * the BigInteger versions make for scaled modes; add keys it off the resolved mode and subtract
+   * off this instance's mode.
+   */
+  private fun addOrSubtractCompact(
+    other: BigDecimal,
+    decimalMode: DecimalMode,
+    subtract: Boolean,
+    scaleToDigits: Boolean,
+  ): BigDecimal? {
+    // Align both significands to the smaller unit exponent, as bringSignificandToSameExponent does.
+    val thisUnitExponent = exponent - CompactArithmetic.digitCount(compact) + 1
+    val otherUnitExponent = other.exponent - CompactArithmetic.digitCount(other.compact) + 1
+    var first = compact
+    var second = other.compact
+    if (thisUnitExponent > otherUnitExponent) {
+      first = CompactArithmetic.scaleByPowerOfTen(first, thisUnitExponent - otherUnitExponent)
+    } else if (otherUnitExponent > thisUnitExponent) {
+      second = CompactArithmetic.scaleByPowerOfTen(second, otherUnitExponent - thisUnitExponent)
+    }
+    if (first == CompactArithmetic.INFLATED || second == CompactArithmetic.INFLATED) {
+      return null
+    }
+    val firstNumOfDigits = CompactArithmetic.digitCount(first)
+    val secondNumOfDigits = CompactArithmetic.digitCount(second)
+    val newSignificand =
+      if (subtract) CompactArithmetic.subtract(first, second)
+      else CompactArithmetic.add(first, second)
+    if (newSignificand == CompactArithmetic.INFLATED) {
+      return null
+    }
+    val newSignificandNumOfDigit = CompactArithmetic.digitCount(newSignificand)
+    val largerOperand = max(firstNumOfDigits, secondNumOfDigits)
+    val carryDetected = newSignificandNumOfDigit - largerOperand
+    val newExponent = max(this.exponent, other.exponent) + carryDetected
+    return if (scaleToDigits) {
+      roundOrDontCompact(
+        newSignificand,
+        newExponent,
+        decimalMode.copy(decimalPrecision = newSignificandNumOfDigit),
+      )
+    } else {
+      roundOrDontCompact(newSignificand, newExponent, decimalMode)
+    }
+  }
+
+  /** [divide] when both operands are compact and non-zero. */
+  private fun divideCompact(other: BigDecimal, decimalMode: DecimalMode): BigDecimal? {
+    val divisor = other.compact
+    if (decimalMode.isPrecisionUnlimited && decimalMode.usingScale.not()) {
+      val newExponent = this.exponent - other.exponent
+      val power = (other.precision * 2 + 6)
+      val quotientAndRemainder = LongArray(2)
+      if (!CompactArithmetic.scaledDivide(compact, divisor, power, quotientAndRemainder)) {
+        return null
+      }
+      val result = quotientAndRemainder[0]
+      val remainder = quotientAndRemainder[1]
+      val thisPreparedDigits = CompactArithmetic.digitCount(compact) + power
+      val expectedDiff = other.precision - 1
+      val exponentModifier =
+        expectedDiff + (CompactArithmetic.digitCount(result) - thisPreparedDigits)
+      if (remainder != 0L) {
+        throw ArithmeticException(
+          "Non-terminating result of division operation " +
+            "(i.e. 1/3 = 0.3333... library needs to know when to stop and how to round up at that point). " +
+            "Specify decimalPrecision inside your decimal mode."
+        )
+      }
+      return fromCompact(result, newExponent + exponentModifier, decimalMode)
+    }
+    val desiredPrecision = decimalMode.decimalPrecision
+    val power =
+      if (desiredPrecision + other.precision - this.precision > 0) {
+        desiredPrecision + other.precision - this.precision + 5
+      } else {
+        this.precision - desiredPrecision - other.precision + 5
+      }
+    val quotientAndRemainder = LongArray(2)
+    if (!CompactArithmetic.scaledDivide(compact, divisor, power, quotientAndRemainder)) {
+      return null
+    }
+    val quotient = quotientAndRemainder[0]
+    val remainder = quotientAndRemainder[1]
+    val quotientDigits = CompactArithmetic.digitCount(quotient)
+    val thisPreparedDigits = CompactArithmetic.digitCount(compact) + power
+    val expectedNumOfDigitsInQuotient = thisPreparedDigits - other.precision
+    val exponentModifier = quotientDigits - expectedNumOfDigitsInQuotient - 1
+    val precisionDifference = quotientDigits - desiredPrecision
+    if (precisionDifference < 0 || precisionDifference > CompactArithmetic.MAX_POWER_OF_TEN) {
+      return null
+    }
+    val sizeDivisor = CompactArithmetic.powerOfTen(precisionDifference.toInt())
+    val quotientToSize = quotient / sizeDivisor
+    val remainderToSize = quotient % sizeDivisor
+    if (remainderToSize == 0L) {
+      return fromCompact(
+        quotientToSize,
+        this.exponent - other.exponent + exponentModifier,
+        decimalMode,
+      )
+    }
+    val signOfTheResultOfDivision =
+      if (this.signum() == other.signum()) Sign.POSITIVE else Sign.NEGATIVE
+    val isEven = CompactArithmetic.isEven(quotientToSize)
+    val isHalfRounding = isHalfRounding(decimalMode.roundingMode)
+    val remainderToSizeDigits = CompactArithmetic.digitCount(remainderToSize)
+    val decider =
+      if (
+        remainderToSizeDigits + CompactArithmetic.digitCount(quotientToSize) < quotientDigits &&
+          isHalfRounding
+      ) {
+        SignificantDecider.ZERO
+      } else {
+        val border = CompactArithmetic.powerOfTen((remainderToSizeDigits - 1).toInt()) * 5L
+        val remainderMagnitude = if (remainderToSize < 0) -remainderToSize else remainderToSize
+        when {
+          remainderMagnitude < border -> SignificantDecider.LESS_THAN_FIVE
+          remainderMagnitude > border -> SignificantDecider.MORE_THAN_FIVE
+          else ->
+            if (remainder == 0L) SignificantDecider.FIVE else SignificantDecider.MORE_THAN_FIVE
+        }
+      }
+    val roundedQuotient =
+      roundWithDeciderCompact(
+        quotientToSize,
+        decimalMode.roundingMode,
+        signOfTheResultOfDivision,
+        decider,
+        isEven,
+      )
+    if (roundedQuotient == CompactArithmetic.INFLATED) {
+      return null
+    }
+    val roundedQuotientExponentModifier =
+      CompactArithmetic.digitCount(roundedQuotient) - CompactArithmetic.digitCount(quotientToSize)
+    return fromCompact(
+      roundedQuotient,
+      this.exponent - other.exponent + exponentModifier + roundedQuotientExponentModifier,
+      decimalMode,
+    )
+  }
+
+  /**
+   * The integer part as a `Long`, or [CompactArithmetic.INFLATED] when this value is not compact or
+   * the integer part does not fit. Mirrors [toBigInteger].
+   */
+  private fun integerPartCompact(): Long {
+    if (!isCompact) {
+      return CompactArithmetic.INFLATED
+    }
+    if (exponent < 0) {
+      return 0L
+    }
+    val precisionExponentDiff = exponent - precision
+    return when {
+      precisionExponentDiff > 0 ->
+        CompactArithmetic.scaleByPowerOfTen(compact, precisionExponentDiff + 1)
+      precisionExponentDiff < 0 -> {
+        val dropped = -precisionExponentDiff - 1
+        if (dropped > CompactArithmetic.MAX_POWER_OF_TEN) {
+          CompactArithmetic.INFLATED
+        } else {
+          compact / CompactArithmetic.powerOfTen(dropped.toInt())
+        }
+      }
+      else -> CompactArithmetic.multiply(compact, 10L)
+    }
   }
 
   /**
@@ -1664,7 +2414,7 @@ private constructor(
     if (places == 0) {
       return this
     }
-    return copy(exponent = exponent + places)
+    return rebuild(exponent = exponent + places)
   }
 
   /**
@@ -1675,7 +2425,7 @@ private constructor(
     if (places == 0L) {
       return this
     }
-    return copy(exponent = exponent + places)
+    return rebuild(exponent = exponent + places)
   }
 
   // TODO in 0.3.x
@@ -1737,10 +2487,10 @@ private constructor(
   /** Return this truncated by using floor rounding */
   fun floor(): BigDecimal {
     if (exponent < 0) {
-      return when (significand.sign) {
-        Sign.POSITIVE -> ZERO
-        Sign.NEGATIVE -> ONE.negate()
-        Sign.ZERO -> ZERO
+      return when {
+        signum() > 0 -> ZERO
+        signum() < 0 -> ONE.negate()
+        else -> ZERO
       }
     }
     return roundSignificand(DecimalMode(exponent + 1, RoundingMode.FLOOR))
@@ -1752,10 +2502,10 @@ private constructor(
       return ZERO
     }
     if (exponent < 0) {
-      return when (significand.sign) {
-        Sign.POSITIVE -> ONE
-        Sign.NEGATIVE -> ZERO
-        Sign.ZERO -> ZERO
+      return when {
+        signum() > 0 -> ONE
+        signum() < 0 -> ZERO
+        else -> ZERO
       }
     }
     return roundSignificand(DecimalMode(exponent + 1, RoundingMode.CEILING))
@@ -1765,6 +2515,10 @@ private constructor(
   fun toBigInteger(): BigInteger {
     if (exponent < 0) {
       return BigInteger.ZERO
+    }
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      return BigInteger.fromLong(compactIntegerPart)
     }
     val precisionExponentDiff = exponent - precision
     return when {
@@ -1795,14 +2549,23 @@ private constructor(
         exponent > 0 && exponent == precision -> precision + 1 // Same as above
         exponent < 0 -> exponent.absoluteValue + precision
         exponent == 0L -> {
-          var s = significand
-          if (s.isZero()) return 1L
+          if (isZero()) return 1L
           var zeroCount = -1L
-          do {
-            val res = s.divrem(BigInteger.TEN)
-            s = res.quotient
-            zeroCount++
-          } while (res.remainder.isZero())
+          if (isCompact) {
+            var s = compact
+            do {
+              val remainder = s % 10L
+              s /= 10L
+              zeroCount++
+            } while (remainder == 0L)
+          } else {
+            var s = significand
+            do {
+              val res = s.divrem(BigInteger.TEN)
+              s = res.quotient
+              zeroCount++
+            } while (res.remainder.isZero())
+          }
           precision - zeroCount
         }
 
@@ -1913,12 +2676,14 @@ private constructor(
   }
 
   /** Returns a new negated instance */
-  override fun unaryMinus(): BigDecimal {
-    return BigDecimal(significand.negate(), exponent, decimalMode)
-  }
+  override fun unaryMinus(): BigDecimal = negate()
 
+  /**
+   * Overwrites the inflated significand if one exists. A compact significand is an immutable `Long`
+   * field and cannot be cleared.
+   */
   override fun secureOverwrite() {
-    significand.secureOverwrite()
+    inflatedCache?.secureOverwrite()
   }
 
   /** Incerement by one */
@@ -1933,11 +2698,17 @@ private constructor(
 
   /** Return Absolute value */
   override fun abs(): BigDecimal {
+    if (isCompact) {
+      return fromCompact(if (compact < 0) -compact else compact, exponent, decimalMode)
+    }
     return BigDecimal(significand.abs(), exponent, decimalMode)
   }
 
   /** Negate this BigDecimal */
   override fun negate(): BigDecimal {
+    if (isCompact) {
+      return fromCompact(-compact, exponent, decimalMode)
+    }
     return BigDecimal(significand.negate(), exponent, decimalMode)
   }
 
@@ -1987,7 +2758,8 @@ private constructor(
    *
    * @return Result of signum function for this BigDecimal (-1 negative, 0 zero, 1 positive)
    */
-  override fun signum(): Int = significand.signum()
+  override fun signum(): Int =
+    if (isCompact) CompactArithmetic.signumOf(compact) else significand.signum()
 
   /** The next group of functions are implementations of the NarrowingOperations interface */
   /**
@@ -1999,6 +2771,17 @@ private constructor(
    */
   override fun intValue(exactRequired: Boolean): Int {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      if (
+        exactRequired &&
+          (compactIntegerPart > Int.MAX_VALUE.toLong() ||
+            compactIntegerPart < Int.MIN_VALUE.toLong())
+      ) {
+        throw ArithmeticException("Cannot convert to int and provide exact value")
+      }
+      return compactIntegerPart.toInt()
+    }
     return toBigInteger().intValue(exactRequired)
   }
 
@@ -2011,6 +2794,10 @@ private constructor(
    */
   override fun longValue(exactRequired: Boolean): Long {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      return compactIntegerPart
+    }
     return toBigInteger().longValue(exactRequired)
   }
 
@@ -2023,6 +2810,17 @@ private constructor(
    */
   override fun byteValue(exactRequired: Boolean): Byte {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      if (
+        exactRequired &&
+          (compactIntegerPart > Byte.MAX_VALUE.toLong() ||
+            compactIntegerPart < Byte.MIN_VALUE.toLong())
+      ) {
+        throw ArithmeticException("Cannot convert to byte and provide exact value")
+      }
+      return compactIntegerPart.toByte()
+    }
     return toBigInteger().byteValue(exactRequired)
   }
 
@@ -2035,6 +2833,17 @@ private constructor(
    */
   override fun shortValue(exactRequired: Boolean): Short {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      if (
+        exactRequired &&
+          (compactIntegerPart > Short.MAX_VALUE.toLong() ||
+            compactIntegerPart < Short.MIN_VALUE.toLong())
+      ) {
+        throw ArithmeticException("Cannot convert to short and provide exact value")
+      }
+      return compactIntegerPart.toShort()
+    }
     return toBigInteger().shortValue(exactRequired)
   }
 
@@ -2047,8 +2856,21 @@ private constructor(
    */
   override fun uintValue(exactRequired: Boolean): UInt {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      if (
+        exactRequired && (compactIntegerPart > UInt.MAX_VALUE.toLong() || compactIntegerPart < 0L)
+      ) {
+        throw ArithmeticException("Cannot convert to unsigned int and provide exact value")
+      }
+      return compactMagnitude(compactIntegerPart).toUInt()
+    }
     return toBigInteger().uintValue(exactRequired)
   }
+
+  /** Magnitude of a compact value as an unsigned word, mirroring `BigInteger.magnitude[0]`. */
+  private fun compactMagnitude(value: Long): ULong =
+    if (value < 0) (-value).toULong() else value.toULong()
 
   /**
    * Convert the current value to ULong.
@@ -2059,6 +2881,13 @@ private constructor(
    */
   override fun ulongValue(exactRequired: Boolean): ULong {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      if (exactRequired && compactIntegerPart < 0L) {
+        throw ArithmeticException("Cannot convert to unsigned long and provide exact value")
+      }
+      return compactMagnitude(compactIntegerPart)
+    }
     return toBigInteger().ulongValue(exactRequired)
   }
 
@@ -2071,6 +2900,15 @@ private constructor(
    */
   override fun ubyteValue(exactRequired: Boolean): UByte {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      if (
+        exactRequired && (compactIntegerPart > UByte.MAX_VALUE.toLong() || compactIntegerPart < 0L)
+      ) {
+        throw ArithmeticException("Cannot convert to unsigned byte and provide exact value")
+      }
+      return compactMagnitude(compactIntegerPart).toUByte()
+    }
     return toBigInteger().ubyteValue(exactRequired)
   }
 
@@ -2083,11 +2921,36 @@ private constructor(
    */
   override fun ushortValue(exactRequired: Boolean): UShort {
     checkWholeness(exactRequired)
+    val compactIntegerPart = integerPartCompact()
+    if (compactIntegerPart != CompactArithmetic.INFLATED) {
+      // Mirrors the BigInteger check, which rejects negatives regardless of exactRequired.
+      if (
+        (exactRequired && compactIntegerPart > UShort.MAX_VALUE.toLong()) || compactIntegerPart < 0L
+      ) {
+        throw ArithmeticException("Cannot convert to unsigned short and provide exact value")
+      }
+      return compactMagnitude(compactIntegerPart).toUShort()
+    }
     return toBigInteger().ushortValue(exactRequired)
   }
 
   /** @return true if "this" is a whole number, false if not */
   fun isWholeNumber(): Boolean {
+    if (isCompact) {
+      if (compact == 0L) {
+        return true
+      }
+      // Digits below the unit position must all be zero.
+      val unitExponent = exponent - CompactArithmetic.digitCount(compact) + 1
+      if (unitExponent >= 0) {
+        return true
+      }
+      val fractionalDigits = -unitExponent
+      if (fractionalDigits > CompactArithmetic.MAX_POWER_OF_TEN) {
+        return false
+      }
+      return compact % CompactArithmetic.powerOfTen(fractionalDigits.toInt()) == 0L
+    }
     val res = abs().divrem(ONE)
     val isWholeNumber = res.second.isZero()
     return isWholeNumber
@@ -2184,7 +3047,7 @@ private constructor(
      * For large exponent values, use fallback string parse
      */
     val divExponent = precision - 1 - exponent
-    val f = this.significand.longValue(exactRequired)
+    val f = if (isCompact) compact else this.significand.longValue(exactRequired)
     return if (divExponent >= 0 && divExponent < float10pow.size) {
       f / float10pow[divExponent.toInt()]
     } else {
@@ -2277,9 +3140,14 @@ private constructor(
      *  For large exponent values, use fallback string parse
      */
     val divExponent = precision - 1 - exponent
-    val l = this.significand.longValue(exactRequired)
-    if (this.significand > Long.MAX_VALUE || this.significand < Long.MIN_VALUE) {
-      return toString().toDouble()
+    val l: Long
+    if (isCompact) {
+      l = compact
+    } else {
+      l = this.significand.longValue(exactRequired)
+      if (this.significand > Long.MAX_VALUE || this.significand < Long.MIN_VALUE) {
+        return toString().toDouble()
+      }
     }
     return if (l.toDouble().toLong() == l && divExponent >= 0 && divExponent < double10pow.size) {
       (l / double10pow[divExponent.toInt()])
@@ -2301,6 +3169,11 @@ private constructor(
   fun roundSignificand(decimalMode: DecimalMode?): BigDecimal {
     if (decimalMode == null) {
       return this
+    }
+    if (isCompact) {
+      roundSignificandCompact(compact, exponent, decimalMode)?.let {
+        return it
+      }
     }
     return Companion.roundSignificand(this.significand, this.exponent, decimalMode)
   }
@@ -2338,11 +3211,7 @@ private constructor(
         }
       }
 
-    return if (decimalMode == null) {
-      BigDecimal(rounded.significand, rounded.exponent)
-    } else {
-      BigDecimal(rounded.significand, rounded.exponent, decimalMode)
-    }
+    return rounded.rebuild(decimalMode = decimalMode)
   }
 
   /**
@@ -2369,17 +3238,13 @@ private constructor(
         exponent < 0 -> roundToDigitPosition(digitPosition + 1, roundingMode)
         else -> throw RuntimeException("Unexpected state")
       }
-    return if (decimalMode == null) {
-      BigDecimal(rounded.significand, rounded.exponent)
-    } else {
-      BigDecimal(rounded.significand, rounded.exponent, decimalMode)
-    }
+    return rounded.rebuild(decimalMode = decimalMode)
   }
 
   private fun getRidOfRadix(bigDecimal: BigDecimal): BigDecimal {
-    val precision = bigDecimal.significand.numberOfDecimalDigits()
+    val precision = bigDecimal.significandDigits()
     val newExponent = bigDecimal.exponent - precision + 1
-    return BigDecimal(bigDecimal.significand, newExponent)
+    return bigDecimal.rebuild(exponent = newExponent, decimalMode = null)
   }
 
   /**
@@ -2449,12 +3314,12 @@ private constructor(
 
   /** Compare to other BigDecimal */
   fun compare(other: BigDecimal): Int {
-    val sign = significand.sign
-    val otherSign = other.significand.sign
+    val sign = signum()
+    val otherSign = other.signum()
     if (sign != otherSign) {
-      return signOrder(sign).compareTo(signOrder(otherSign))
+      return sign.compareTo(otherSign)
     }
-    if (sign == Sign.ZERO) {
+    if (sign == 0) {
       return 0
     }
     // Both non-zero with the same sign. The representation keeps the magnitude within
@@ -2464,9 +3329,26 @@ private constructor(
     // 1E999999999 never materialises a power of ten of that size.
     if (exponent != other.exponent) {
       val magnitudeOrder = exponent.compareTo(other.exponent)
-      return if (sign == Sign.POSITIVE) magnitudeOrder else -magnitudeOrder
+      return if (sign > 0) magnitudeOrder else -magnitudeOrder
     }
     val precisionDelta = precision - other.precision
+    if (isCompact && other.isCompact) {
+      when {
+        precisionDelta == 0L -> return compact.compareTo(other.compact)
+        precisionDelta > 0L -> {
+          val aligned = CompactArithmetic.scaleByPowerOfTen(other.compact, precisionDelta)
+          if (aligned != CompactArithmetic.INFLATED) {
+            return compact.compareTo(aligned)
+          }
+        }
+        else -> {
+          val aligned = CompactArithmetic.scaleByPowerOfTen(compact, -precisionDelta)
+          if (aligned != CompactArithmetic.INFLATED) {
+            return aligned.compareTo(other.compact)
+          }
+        }
+      }
+    }
     return when {
       precisionDelta == 0L -> significand.compare(other.significand)
       precisionDelta > 0L ->
@@ -2474,13 +3356,6 @@ private constructor(
       else -> (significand * BigInteger.TEN.pow(-precisionDelta)).compare(other.significand)
     }
   }
-
-  private fun signOrder(sign: Sign): Int =
-    when (sign) {
-      Sign.NEGATIVE -> -1
-      Sign.ZERO -> 0
-      Sign.POSITIVE -> 1
-    }
 
   override fun compareTo(other: Any): Int {
     if (other is Number) {
@@ -2539,6 +3414,11 @@ private constructor(
     if (this.isZero()) {
       return 0
     }
+    if (isCompact) {
+      // Same value as hashing the trailing-zero-stripped BigInteger form.
+      return CompactArithmetic.significandHashCode(CompactArithmetic.removeTrailingZeros(compact)) +
+        exponent.hashCode()
+    }
     return removeTrailingZeroes(this).significand.hashCode() + exponent.hashCode()
   }
 
@@ -2547,15 +3427,15 @@ private constructor(
     if (useToStringExpanded) {
       return toStringExpanded()
     }
-    val significandString = significand.toString(10)
+    val significandString = if (isCompact) compact.toString() else significand.toString(10)
     val modifier =
-      if (significand < 0) {
+      if (signum() < 0) {
         2
       } else {
         1
       }
     val expand =
-      if (significand.toString().dropLastWhile { it == '0' }.length <= 1) {
+      if (significandString.dropLastWhile { it == '0' }.length <= 1) {
         "0"
       } else {
         ""
@@ -2628,13 +3508,18 @@ private constructor(
     if (this.isZero()) {
       return "0"
     }
-    val digits = significand.numberOfDecimalDigits()
+    val digits = significandDigits()
     if (exponent > Int.MAX_VALUE) {
       throw RuntimeException("Invalid toStringExpanded request (exponent > Int.MAX_VALUE)")
     }
-    val significandString = significand.toStringWithoutSign(10)
+    val significandString =
+      if (isCompact) {
+        (if (compact < 0) -compact else compact).toString()
+      } else {
+        significand.toStringWithoutSign(10)
+      }
     val sign =
-      if (significand.sign == Sign.NEGATIVE) {
+      if (signum() < 0) {
         "-"
       } else {
         ""

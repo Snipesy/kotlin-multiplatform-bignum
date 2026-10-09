@@ -10,6 +10,15 @@
   publishing scripts.
 - Faster parsing, printing and digit counting, and BigDecimal comparison that no longer
   materialises powers of ten: 10,000-digit toString 3,976 ms -> 7 ms on the JVM.
+- BigDecimal keeps its significand in a `Long` whenever it fits, in the style of
+  `java.math.BigDecimal`, and only materialises a `BigInteger` when a result overflows 18 digits.
+  Construction, parsing, add, subtract, multiply, divide, rounding, comparison, narrowing and
+  printing all run on `Long` arithmetic for such values; results that overflow fall back to the
+  `BigInteger` paths unchanged, and a differential test checks that both forms agree. JVM timings
+  for 1234.56 and 78.901: parse 177 -> 29 ns, add 181 -> 39 ns, multiply 86 -> 20 ns,
+  add under a 10-digit mode 207 -> 39 ns, divide under a 10-digit mode 419 -> 46 ns,
+  toString 243 -> 63 ns. Modes that request 19 or more digits of precision still produce
+  `BigInteger` significands, since results carry exactly the requested precision.
 
 ##### 0.3.10 - 15.7.2024
 - Fix for #280, return byte array containing zero instead of empty array when big integer is zero.
