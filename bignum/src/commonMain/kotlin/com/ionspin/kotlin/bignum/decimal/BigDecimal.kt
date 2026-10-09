@@ -2302,12 +2302,35 @@ class BigDecimal private constructor(
      * Compare to other BigDecimal
      */
     fun compare(other: BigDecimal): Int {
-        return if (this.exponent == other.exponent && this.precision == other.precision) {
-            significand.compare(other.significand)
-        } else {
-            val (preparedFirst, preparedSecond) = bringSignificandToSameExponent(this, other)
-            preparedFirst.compare(preparedSecond)
+        val sign = significand.sign
+        val otherSign = other.significand.sign
+        if (sign != otherSign) {
+            return signOrder(sign).compareTo(signOrder(otherSign))
         }
+        if (sign == Sign.ZERO) {
+            return 0
+        }
+        // Both non-zero with the same sign. The representation keeps the magnitude within
+        // [10^exponent, 10^(exponent + 1)), so differing exponents settle the order without any
+        // arithmetic. Equal exponents only need the significands aligned by digit count, which is
+        // bounded by the precision rather than by the exponent, so comparing values such as
+        // 1E999999999 never materialises a power of ten of that size.
+        if (exponent != other.exponent) {
+            val magnitudeOrder = exponent.compareTo(other.exponent)
+            return if (sign == Sign.POSITIVE) magnitudeOrder else -magnitudeOrder
+        }
+        val precisionDelta = precision - other.precision
+        return when {
+            precisionDelta == 0L -> significand.compare(other.significand)
+            precisionDelta > 0L -> significand.compare(other.significand * BigInteger.TEN.pow(precisionDelta))
+            else -> (significand * BigInteger.TEN.pow(-precisionDelta)).compare(other.significand)
+        }
+    }
+
+    private fun signOrder(sign: Sign): Int = when (sign) {
+        Sign.NEGATIVE -> -1
+        Sign.ZERO -> 0
+        Sign.POSITIVE -> 1
     }
 
     override fun compareTo(other: Any): Int {

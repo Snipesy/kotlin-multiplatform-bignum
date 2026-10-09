@@ -422,31 +422,28 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
     }
 
     override fun numberOfDecimalDigits(operand: ULongArray): Long {
-        val bitLenght =
-            bitLength(operand)
-        val minDigit = ceil((bitLenght - 1) * BigInteger.LOG_10_OF_2)
-//        val maxDigit = floor(bitLenght * LOG_10_OF_2) + 1
-//        val correct = this / 10.toBigInteger().pow(maxDigit.toInt())
-//        return when {
-//            correct.isZero() -> maxDigit.toInt() - 1
-//            correct > 0 && correct < 10 -> maxDigit.toInt()
-//            else -> -1
-//        }
-
-        var tmp = operand / pow(
-            TEN,
-            minDigit.toLong()
-        )
+        if (compare(operand, ZERO) == 0) {
+            return 1
+        }
+        // floor((bits - 1) * log10(2)) never exceeds the true digit count minus one, so the
+        // estimate only ever needs correcting upwards, and by at most two.
+        val lowerBound = floor((bitLength(operand) - 1) * BigInteger.LOG_10_OF_2).toLong()
+        if (lowerBound + 3 < powersOf10.size) {
+            var digits = lowerBound + 1
+            while (compare(operand, powersOf10[digits.toInt()]) >= 0) {
+                digits++
+            }
+            return digits
+        }
+        // The quotient has at most a few digits, so this division is cheap even though the
+        // divisor is as long as the operand.
+        var tmp = operand / pow(TEN, lowerBound)
         var counter = 0L
-        while (compare(
-                tmp,
-                ZERO
-            ) != 0
-        ) {
+        while (compare(tmp, ZERO) != 0) {
             tmp /= TEN
             counter++
         }
-        return counter + minDigit.toInt()
+        return counter + lowerBound
     }
 
     fun baseAddIntoArray(resultArray: ULongArray, resultArrayStart: Int, first: ULongArray, second: ULongArray) {
@@ -1635,10 +1632,35 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
 
     override fun divide(first: ULongArray, second: ULongArray): Pair<ULongArray, ULongArray> {
         // debugOperandsCheck(first, second)
+        if (second.size - countLeadingZeroWords(second) == 1 && second[0] in 1UL..lowMask) {
+            return divideBySmallWord(first, second[0])
+        }
         return baseDivide(
             first,
             second
         )
+    }
+
+    /**
+     * Divides [operand] by a single word below 2^32 in one linear pass. Each 63-bit word is split
+     * into its high 31 and low 32 bits so that every intermediate dividend fits in a ULong; the
+     * result is exact and the quotient word never exceeds 63 bits because the carried remainder
+     * is always smaller than the divisor.
+     */
+    internal fun divideBySmallWord(operand: ULongArray, divisor: ULong): Pair<ULongArray, ULongArray> {
+        val quotient = ULongArray(operand.size)
+        var remainder = 0UL
+        for (i in operand.size - 1 downTo 0) {
+            val word = operand[i]
+            val high = (remainder shl 31) or (word shr 32)
+            val quotientHigh = high / divisor
+            remainder = high % divisor
+            val low = (remainder shl 32) or (word and lowMask)
+            val quotientLow = low / divisor
+            remainder = low % divisor
+            quotient[i] = (quotientHigh shl 32) or quotientLow
+        }
+        return Pair(removeLeadingZeros(quotient), if (remainder == 0UL) ZERO else ulongArrayOf(remainder))
     }
 
     internal fun reciprocalDivision(first: ULongArray, second: ULongArray): Pair<ULongArray, ULongArray> {
@@ -1944,31 +1966,87 @@ internal object BigInteger63Arithmetic : BigIntegerArithmetic {
         }
     }
 
-    override fun parseForBase(number: String, base: Int): ULongArray {
-        var parsed = ZERO
-        number.lowercase().forEach { char ->
-            parsed = (parsed * base.toULong()) + (char.toDigit(base)).toULong()
+    /**
+     * Per base 2..36: how many digits fit in one 63-bit word when parsing (`parseChunkDigits`),
+     * and how many fit below 2^32 when printing (`printChunkDigits`, whose divisor stays on the
+     * linear [divideBySmallWord] path). Parsing and printing move that many digits per big-integer
+     * operation instead of one: 18 and 9 for base 10.
+     */
+    private val parseChunkDigits = IntArray(37)
+    private val printChunkDigits = IntArray(37)
+    private val printChunkDivisor = ULongArray(37)
+
+    init {
+        for (base in 2..36) {
+            val word = base.toULong()
+            var digits = 0
+            var multiplier = 1UL
+            while (multiplier <= baseMask / word) {
+                multiplier *= word
+                digits++
+            }
+            parseChunkDigits[base] = digits
+            digits = 0
+            multiplier = 1UL
+            while (multiplier <= lowMask / word) {
+                multiplier *= word
+                digits++
+            }
+            printChunkDigits[base] = digits
+            printChunkDivisor[base] = multiplier
         }
-        return removeLeadingZeros(
-            parsed
-        )
+    }
+
+    override fun parseForBase(number: String, base: Int): ULongArray {
+        // Accumulate up to parseChunkDigits digits in a single word, then fold that word into the
+        // result with one multiply-add, so an n-digit number costs n / chunk big-integer passes.
+        val chunkDigits = parseChunkDigits[base]
+        val word = base.toULong()
+        val length = number.length
+        var parsed = ZERO
+        var index = 0
+        var chunkLength = length % chunkDigits
+        if (chunkLength == 0) {
+            chunkLength = chunkDigits
+        }
+        while (index < length) {
+            var chunk = 0UL
+            var multiplier = 1UL
+            val end = index + chunkLength
+            while (index < end) {
+                chunk = chunk * word + number[index].toDigit(base).toULong()
+                multiplier *= word
+                index++
+            }
+            parsed = (parsed * multiplier) + chunk
+            chunkLength = chunkDigits
+        }
+        return removeLeadingZeros(parsed)
     }
 
     override fun toString(operand: ULongArray, base: Int): String {
-        var copy = operand.copyOf()
-        val baseArray = ulongArrayOf(base.toULong())
-        val stringBuilder = StringBuilder()
-        while (copy != ZERO) {
-            val divremResult = (copy divrem baseArray)
-            if (divremResult.second.isEmpty()) {
-                stringBuilder.append(0)
-            } else {
-                stringBuilder.append(divremResult.second[0].toString(base))
-            }
-
-            copy = divremResult.first
+        // Peel off printChunkDigits digits per (linear) division instead of one; each remainder
+        // is a single word that the platform formats.
+        val chunkDigits = printChunkDigits[base]
+        val divisor = printChunkDivisor[base]
+        var copy = removeLeadingZeros(operand)
+        if (compare(copy, ZERO) == 0) {
+            return "0"
         }
-        return stringBuilder.toString().reversed()
+        val chunks = ArrayList<ULong>()
+        while (compare(copy, ZERO) != 0) {
+            val (quotient, remainder) = divideBySmallWord(copy, divisor)
+            chunks.add(if (remainder.isEmpty()) 0UL else remainder[0])
+            copy = quotient
+        }
+        val stringBuilder = StringBuilder(chunks.size * chunkDigits)
+        stringBuilder.append(chunks[chunks.size - 1].toString(base))
+        for (i in chunks.size - 2 downTo 0) {
+            val digits = chunks[i].toString(base)
+            repeat(chunkDigits - digits.length) { stringBuilder.append('0') }
+            stringBuilder.append(digits)
+        }
+        return stringBuilder.toString()
     }
 
     override fun and(operand: ULongArray, mask: ULongArray): ULongArray {

@@ -63,7 +63,7 @@ class BigInteger63JavaStringConversionTests {
         for (i in 1..Int.MAX_VALUE step 7001) {
             jobList.add(
                 GlobalScope.launch {
-                    toStringSingleTest(ulongArrayOf(random.nextULong()), 10)
+                    toStringSingleTest(ulongArrayOf(random.nextULong() shr 1), 10)
                 }
             )
         }
@@ -85,8 +85,9 @@ class BigInteger63JavaStringConversionTests {
         for (i in 1..Int.MAX_VALUE step 7001) {
             jobList.add(
                 GlobalScope.launch {
+                    // Words are 63 bits wide; the top bit must be clear.
                     toStringSingleTest(
-                        ulongArrayOf(random.nextULong(), random.nextULong()),
+                        ulongArrayOf(random.nextULong() shr 1, random.nextULong() shr 1),
                         random.nextInt(2, 36)
                     ) // 36 is the max java bigint supports
                 }

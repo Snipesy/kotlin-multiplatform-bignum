@@ -574,32 +574,7 @@ class BigInteger internal constructor(wordArray: WordArray, requestedSign: Sign)
     }
 
     override fun numberOfDecimalDigits(): Long {
-        if (isZero()) {
-            return 1
-        }
-        // Search through firsts powersOf10
-        val powersOf10 = BigInteger63Arithmetic.powersOf10
-        val quickSearch = powersOf10.indexOfFirst { it > magnitude }
-        if (quickSearch != -1) {
-            return quickSearch.toLong()
-        }
-//        val bitLength = arithmetic.bitLength(magnitude)
-//        val minDigit = ceil((bitLength - 1) * LOG_10_OF_2)
-//        val maxDigit = floor(bitLenght * LOG_10_OF_2) + 1
-//        val correct = this / 10.toBigInteger().pow(maxDigit.toInt())
-//        return when {
-//            correct == ZERO -> maxDigit.toInt() - 1
-//            correct > 0 && correct < 10 -> maxDigit.toInt()
-//            else -> -1
-//        }
-
-        var tmp = this / TEN.pow(powersOf10.size)
-        var counter = 0L
-        while (!tmp.isZero()) {
-            tmp /= 10
-            counter++
-        }
-        return counter + powersOf10.size
+        return arithmetic.numberOfDecimalDigits(magnitude)
     }
 
     override infix fun shl(places: Int): BigInteger {
