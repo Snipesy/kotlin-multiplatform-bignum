@@ -1663,13 +1663,22 @@ private constructor(
       val leftEnd = index
       if (index == length) {
         // Plain integer.
-        val digits = leftEnd - leftStart
-        if (digits == 0 || digits > CompactArithmetic.MAX_POWER_OF_TEN) {
+        if (leftEnd == leftStart) {
+          return null
+        }
+        var firstSignificant = leftStart
+        while (firstSignificant < leftEnd - 1 && input[firstSignificant] == '0') {
+          firstSignificant++
+        }
+        if (leftEnd - firstSignificant > CompactArithmetic.MAX_COMPACT_DIGITS) {
           return null
         }
         var value = 0L
-        for (i in leftStart until leftEnd) {
-          value = value * 10L + (input[i] - '0')
+        for (i in firstSignificant until leftEnd) {
+          value = CompactArithmetic.accumulateDigit(value, input[i] - '0')
+          if (value < 0L) {
+            return null
+          }
         }
         val signed = if (negative) -value else value
         return fromCompact(signed, CompactArithmetic.digitCount(signed) - 1, decimalMode)
@@ -1699,15 +1708,35 @@ private constructor(
       val rightTruncatedEnd = if (rightLastNonZero < rightStart) rightEnd else rightLastNonZero + 1
       val rightTruncatedLength = rightTruncatedEnd - rightStart
       val totalLength = leftTruncatedLength + rightTruncatedLength
-      if (totalLength == 0 || totalLength > CompactArithmetic.MAX_POWER_OF_TEN) {
+      if (totalLength == 0) {
+        return null
+      }
+      // Only digits after the first non-zero one carry value, so a long run of leading zeros in
+      // the fraction (0.000000000000000001) still parses compactly.
+      var significantDigits = totalLength
+      if (leftTruncatedLength == 0 || input[leftTruncatedStart] == '0') {
+        significantDigits = rightTruncatedLength
+        var i = rightStart
+        while (i < rightTruncatedEnd && input[i] == '0') {
+          significantDigits--
+          i++
+        }
+      }
+      if (significantDigits > CompactArithmetic.MAX_COMPACT_DIGITS) {
         return null
       }
       var value = 0L
       for (i in leftTruncatedStart until leftEnd) {
-        value = value * 10L + (input[i] - '0')
+        value = CompactArithmetic.accumulateDigit(value, input[i] - '0')
+        if (value < 0L) {
+          return null
+        }
       }
       for (i in rightStart until rightTruncatedEnd) {
-        value = value * 10L + (input[i] - '0')
+        value = CompactArithmetic.accumulateDigit(value, input[i] - '0')
+        if (value < 0L) {
+          return null
+        }
       }
       val exponent =
         if (leftTruncatedLength > 0 && input[leftTruncatedStart] != '0') {

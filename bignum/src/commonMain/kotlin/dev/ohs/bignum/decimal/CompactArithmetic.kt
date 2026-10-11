@@ -179,21 +179,43 @@ internal object CompactArithmetic {
     return true
   }
 
-  /** Parses an unsigned digit string of at most [MAX_POWER_OF_TEN] characters. */
+  /**
+   * Parses an unsigned digit string into a compact value, or [INFLATED] when its value exceeds
+   * [Long.MAX_VALUE]. Leading zeros carry no value and so never push a string over the limit; what
+   * matters is the magnitude, the same rule the rest of the compact form uses.
+   */
   fun parseDigits(digits: String): Long {
-    if (digits.isEmpty() || digits.length > MAX_POWER_OF_TEN) {
+    if (digits.isEmpty()) {
+      return INFLATED
+    }
+    var index = 0
+    while (index < digits.length - 1 && digits[index] == '0') {
+      index++
+    }
+    if (digits.length - index > MAX_COMPACT_DIGITS) {
       return INFLATED
     }
     var result = 0L
-    for (char in digits) {
-      val digit = char - '0'
+    while (index < digits.length) {
+      val digit = digits[index] - '0'
       if (digit < 0 || digit > 9) {
         return INFLATED
       }
-      result = result * 10L + digit
+      result = accumulateDigit(result, digit)
+      if (result < 0L) {
+        return INFLATED
+      }
+      index++
     }
     return result
   }
+
+  /** Digits a compact magnitude can have: Long.MAX_VALUE is 9223372036854775807. */
+  const val MAX_COMPACT_DIGITS: Int = 19
+
+  /** `value * 10 + digit`, or -1 when that would exceed [Long.MAX_VALUE]. */
+  fun accumulateDigit(value: Long, digit: Int): Long =
+    if (value > (Long.MAX_VALUE - digit) / 10L) -1L else value * 10L + digit
 
   /** Strips trailing decimal zeros from a non-zero value. */
   fun removeTrailingZeros(value: Long): Long {
